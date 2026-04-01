@@ -1,16 +1,7 @@
 services:
-  # Backend Web Service
   - type: web
-    name: my-backend
-    runtime: node
+    name: kaleb-teshome
+    env: node
     plan: free
-    rootDir: backend
-    buildCommand: npm install
-    startCommand: node index.js
-
-  # Frontend Static Site
-  - type: static
-    name: my-frontend
-    rootDir: frontend
-    buildCommand: npm install && npm run build
-    publishPath: dist # or 'build' depending on your framework
+    buildCommand: npm ci && npx prisma generate && npx prisma db push
+    startCommand: npm start
