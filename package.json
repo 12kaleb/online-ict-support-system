@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
-    "@prisma/client": "^6.19.2",
     "@supabase/supabase-js": "^2.101.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
@@ -41,6 +40,7 @@
     "vite": "^6.2.0"
   },
   "devDependencies": {
+    "@prisma/client": "6.19.3",
     "@types/bcryptjs": "^2.4.6",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
@@ -48,7 +48,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
-    "prisma": "^6.19.2",
+    "prisma": "6.19.3",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
