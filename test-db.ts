@@ -1,10 +1,19 @@
 
 import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from "@prisma/adapter-pg";
+import pg from "pg";
 import * as dotenv from 'dotenv';
 
 dotenv.config();
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
-const prisma = new PrismaClient();
+const pool = new pg.Pool({ 
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("localhost") ? false : { rejectUnauthorized: false }
+});
+const adapter = new PrismaPg(pool);
+const prisma = new PrismaClient({ adapter });
+
 
 async function main() {
   const dbUrl = process.env.DATABASE_URL;

@@ -127,7 +127,7 @@ async function startServer() {
         }
 
         if (newStatus !== ticket.slaStatus) {
-          await prisma.ticket.update({
+          await (prisma.ticket as any).update({
             where: { id: ticket.id },
             data: { slaStatus: newStatus }
           });
@@ -154,6 +154,24 @@ async function startServer() {
   // Health Check
   app.get("/api/health", async (req, res) => {
     try {
+      if (!process.env.DATABASE_URL) {
+        return res.status(500).json({ 
+          status: "error", 
+          database: "disconnected", 
+          message: "DATABASE_URL environment variable is not set.",
+          code: "DATABASE_URL_MISSING"
+        });
+      }
+      
+      if (process.env.DATABASE_URL.includes("localhost:5432")) {
+        return res.status(500).json({ 
+          status: "error", 
+          database: "disconnected", 
+          message: "DATABASE_URL is set to 'localhost:5432'. Please provide a real PostgreSQL connection string.",
+          code: "DATABASE_URL_DEFAULT_VALUE"
+        });
+      }
+
       await prisma.$queryRaw`SELECT 1`;
       res.json({ 
         status: "ok", 
@@ -161,7 +179,12 @@ async function startServer() {
         provider: "postgresql"
       });
     } catch (err) {
-      res.status(500).json({ status: "error", database: "disconnected", message: "Database connection failed" });
+      res.status(500).json({ 
+        status: "error", 
+        database: "disconnected", 
+        message: "Database connection failed. Please check your DATABASE_URL.",
+        code: "DATABASE_CONNECTION_FAILED"
+      });
     }
   });
 
@@ -169,12 +192,6 @@ async function startServer() {
   app.post("/api/auth/register", async (req, res, next) => {
     const { name, email, password, department } = req.body;
     try {
-      // Check if profile already exists in Prisma
-      const existingProfile = await prisma.profile.findUnique({ where: { email } });
-      if (existingProfile) {
-        return res.status(400).json({ error: "A user with this email already exists." });
-      }
-
       // 1. Signup with Supabase Auth
       const { data, error } = await supabase.auth.signUp({
         email,
@@ -243,12 +260,6 @@ async function startServer() {
     }
 
     try {
-      // Check if profile already exists in Prisma
-      const existingProfile = await prisma.profile.findUnique({ where: { email } });
-      if (existingProfile) {
-        return res.status(400).json({ error: "A user with this email already exists." });
-      }
-
       // 1. Create user via Supabase Admin API (no password)
       const { data, error } = await supabaseAdmin.auth.admin.createUser({
         email,
@@ -398,7 +409,7 @@ async function startServer() {
       else if (priority === "medium") dueDate.setDate(dueDate.getDate() + 3);
       else dueDate.setDate(dueDate.getDate() + 7);
 
-      const ticket = await prisma.ticket.create({
+      const ticket = await (prisma.ticket as any).create({
         data: { 
           title, 
           description, 
@@ -1655,12 +1666,7 @@ async function startServer() {
 
   // Global error handler for API routes (placed after all routes)
   app.use((err: any, req: any, res: any, next: any) => {
-    if (err instanceof Prisma.PrismaClientKnownRequestError) {
-      console.error(`Global Error [Prisma ${err.code}]:`, err.message);
-      console.error("Meta:", err.meta);
-    } else {
-      console.error("Global Error:", err);
-    }
+    console.error("Global Error:", err);
     
     // If headers already sent, delegate to default express error handler
     if (res.headersSent) {

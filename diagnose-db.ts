@@ -1,21 +1,30 @@
 import { PrismaClient, Prisma } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
+import pg from "pg";
 import * as dotenv from "dotenv";
 
 dotenv.config();
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 async function diagnose() {
   console.log("--- Database Diagnostic (Supabase) ---");
-  const url = "postgresql://postgres:%40%23Kaleb1301@db.qmmojzifrvtkvlysjpbh.supabase.co:5432/postgres?sslmode=require";
+  const url = process.env.DATABASE_URL;
   
-  console.log(`📡 Attempting to connect to: db.qmmojzifrvtkvlysjpbh.supabase.co`);
+  if (!url) {
+    console.error("❌ DATABASE_URL is not set in the environment.");
+    return;
+  }
   
+  console.log(`📡 Attempting to connect to the database...`);
+  
+  const pool = new pg.Pool({ 
+    connectionString: url,
+    ssl: url.includes("localhost") ? false : { rejectUnauthorized: false }
+  });
+  const adapter = new PrismaPg(pool);
   const prisma = new PrismaClient({
     log: ['query', 'info', 'warn', 'error'],
-    datasources: {
-      db: {
-        url: url,
-      },
-    },
+    adapter
   });
 
   try {
