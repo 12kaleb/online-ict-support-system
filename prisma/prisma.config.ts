@@ -1,7 +1,4 @@
-import { defineConfig } from "@prisma/config/next"
-
-export default defineConfig({
-  migrateConnectionURI: process.env.DATABASE_URL ?? ''
-})
+// @ts-ignore
+export const migrateConnectionURI = process.env.DATABASE_URL ?? '';
 
 
