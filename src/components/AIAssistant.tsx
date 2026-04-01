@@ -4,8 +4,6 @@ import { GoogleGenAI } from "@google/genai";
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
 interface AIAssistantProps {
   title: string;
   description: string;
@@ -24,6 +22,13 @@ export default function AIAssistant({ title, description, onSuggest }: AIAssista
       return;
     }
 
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      setError("API Key is not configured. Please check your settings.");
+      return;
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
     setLoading(true);
     setError(null);
     try {
