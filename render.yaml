@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: kaleb-teshome
-    env: node
-    plan: free
-    buildCommand: npm ci && npx prisma generate && npx prisma db push
-    startCommand: npm start

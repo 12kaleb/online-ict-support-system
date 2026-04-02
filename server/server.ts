@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import { createServer } from "http";
@@ -5,11 +6,8 @@ import { Server } from "socket.io";
 import path from "path";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import { supabase, supabaseAdmin } from "./supabase";
+import { supabase, supabaseAdmin } from "./lib/supabase";
 import { PrismaClient, Prisma } from "@prisma/client";
-import * as dotenv from "dotenv";
-
-dotenv.config();
 
 if (!process.env.DATABASE_URL) {
   console.warn("⚠️ WARNING: DATABASE_URL environment variable is not set. Database connection will fail.");
@@ -23,6 +21,7 @@ const prisma = new PrismaClient();
 const JWT_SECRET = process.env.JWT_SECRET || "ict-support-secret-key-123";
 
 async function startServer() {
+  console.log("🚀 Starting ICT Support System Server...");
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
@@ -33,6 +32,7 @@ async function startServer() {
   });
   const PORT = 3000;
 
+  console.log("📡 Setting up Socket.IO...");
   io.on("connection", (socket) => {
     console.log("Client connected:", socket.id);
     socket.on("join", (userId) => {
@@ -53,6 +53,11 @@ async function startServer() {
   const authenticate = async (req: any, res: any, next: any) => {
     const token = req.cookies.token;
     if (!token) return res.status(401).json({ error: "Unauthorized" });
+    
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase client not initialized. Check environment variables." });
+    }
+
     try {
       const { data: { user }, error } = await supabase.auth.getUser(token);
       if (error || !user) throw error;
@@ -68,18 +73,25 @@ async function startServer() {
     }
   };
 
+  const isAdmin = (req: any, res: any, next: any) => {
+    if (req.user.role !== "admin") return res.status(403).json({ error: "Forbidden" });
+    next();
+  };
+
   const isManager = (req: any, res: any, next: any) => {
-    if (req.user.role !== "manager") return res.status(403).json({ error: "Forbidden" });
+    if (req.user.role !== "manager" && req.user.role !== "admin") return res.status(403).json({ error: "Forbidden" });
     next();
   };
 
   const isTechnician = (req: any, res: any, next: any) => {
-    if (req.user.role !== "technician" && req.user.role !== "manager") return res.status(403).json({ error: "Forbidden" });
+    if (!["technician", "manager", "admin"].includes(req.user.role)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
     next();
   };
 
-  const isStaff = (req: any, res: any, next: any) => {
-    if (!["manager", "technician", "staff"].includes(req.user.role)) {
+  const isInternal = (req: any, res: any, next: any) => {
+    if (!["staff", "technician", "manager", "admin"].includes(req.user.role)) {
       return res.status(403).json({ error: "Forbidden" });
     }
     next();
@@ -191,6 +203,11 @@ async function startServer() {
   // Auth
   app.post("/api/auth/register", async (req, res, next) => {
     const { name, email, password, department } = req.body;
+    
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase client not initialized. Check environment variables." });
+    }
+
     try {
       // 1. Signup with Supabase Auth
       const { data, error } = await supabase.auth.signUp({
@@ -205,14 +222,15 @@ async function startServer() {
       if (!data.user) return res.status(400).json({ error: "Signup failed" });
 
       // 2. Create profile in Prisma
-      // Note: In a real Supabase setup, you might use a DB trigger, 
-      // but here we do it manually as requested.
+      // Bootstrap the first admin user if it's the developer's email
+      const role = email === "kalebteshome94@gmail.com" ? "admin" : "staff";
+      
       const profile = await prisma.profile.create({
         data: {
           id: data.user.id,
           name,
           email,
-          role: "staff", // Default role for self-signup
+          role,
           department
         }
       });
@@ -223,8 +241,61 @@ async function startServer() {
     }
   });
 
+  // Admin User Creation (Technicians and Managers)
+  app.post("/api/auth/admin/create-user", authenticate, isAdmin, async (req, res, next) => {
+    const { email, name, role, department } = req.body;
+    
+    if (!supabaseAdmin) {
+      return res.status(500).json({ error: "Supabase Admin client not initialized. Check environment variables." });
+    }
+
+    if (!["technician", "manager"].includes(role)) {
+      return res.status(400).json({ error: "Invalid role for admin creation" });
+    }
+
+    try {
+      // 1. Create user via Supabase Admin API
+      // Note: We don't provide a password. Supabase will generate a random one.
+      const { data, error } = await supabaseAdmin.auth.admin.createUser({
+        email,
+        email_confirm: true,
+        user_metadata: { name, role, department }
+      });
+
+      if (error) return res.status(400).json({ error: error.message });
+      if (!data.user) return res.status(400).json({ error: "User creation failed" });
+
+      // 2. Create profile record
+      const profile = await prisma.profile.create({
+        data: {
+          id: data.user.id,
+          name,
+          email,
+          role,
+          department
+        }
+      });
+
+      // 3. Send password setup email (reset password flow)
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(email);
+      if (resetError) {
+        console.error("Failed to send reset email:", resetError);
+        // We don't return error here because the user was already created
+      }
+
+      res.json({ message: `${role} created successfully. Password setup email sent.`, user: profile });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.post("/api/auth/login", async (req, res, next) => {
     const { email, password, rememberMe } = req.body;
+
+    if (!supabase) {
+      return res.status(500).json({ error: "Supabase client not initialized. Check environment variables." });
+    }
+
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
@@ -251,53 +322,15 @@ async function startServer() {
     }
   });
 
-  // Admin: Create Technician or Manager
-  app.post("/api/admin/create-user", authenticate, isManager, async (req, res, next) => {
-    const { email, name, role, department } = req.body;
-    
-    if (!["technician", "manager"].includes(role)) {
-      return res.status(400).json({ error: "Invalid role for manager creation" });
+  app.post("/api/auth/logout", async (req, res) => {
+    if (supabase) {
+      await supabase.auth.signOut();
     }
-
-    try {
-      // 1. Create user via Supabase Admin API (no password)
-      const { data, error } = await supabaseAdmin.auth.admin.createUser({
-        email,
-        email_confirm: true, // Auto-confirm email for manager-created users
-        user_metadata: { name, department }
-      });
-
-      if (error) return res.status(400).json({ error: error.message });
-      if (!data.user) return res.status(400).json({ error: "User creation failed" });
-
-      // 2. Create profile in Prisma
-      const profile = await prisma.profile.create({
-        data: {
-          id: data.user.id,
-          name,
-          email,
-          role,
-          department
-        }
-      });
-
-      // 3. Send password reset/setup email
-      const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: `${process.env.APP_URL}/reset-password`
-      });
-
-      if (resetError) {
-        console.error("Failed to send password reset email:", resetError);
-      }
-
-      res.json({ message: "User created and setup email sent", user: profile });
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.post("/api/auth/logout", (req, res) => {
-    res.clearCookie("token");
+    res.clearCookie("token", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none"
+    });
     res.json({ message: "Logged out" });
   });
 
@@ -332,7 +365,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/tickets/all", authenticate, isStaff, async (req: any, res, next) => {
+  app.get("/api/tickets/all", authenticate, isInternal, async (req: any, res, next) => {
     try {
       await updateSLAStatuses();
       let where: any = {};
@@ -380,7 +413,7 @@ async function startServer() {
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
       // Authorization Check
-      const isStaff = ["manager", "technician", "staff"].includes(req.user.role);
+      const isInternalUser = ["admin", "manager", "technician", "staff"].includes(req.user.role);
       const isOwner = ticket.userId === req.user.id;
       const isAssigned = ticket.assignedTo === req.user.id;
 
@@ -388,7 +421,7 @@ async function startServer() {
         return res.status(403).json({ error: "Technicians can only view assigned tickets" });
       }
 
-      if (!isStaff && !isOwner) {
+      if (!isInternalUser && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -440,7 +473,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/tickets/:id", authenticate, isStaff, async (req: any, res, next) => {
+  app.put("/api/tickets/:id", authenticate, isInternal, async (req: any, res, next) => {
     try {
       const { status, assignedTo, priority } = req.body;
       const oldTicket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
@@ -690,7 +723,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/asset-types", authenticate, isStaff, async (req, res, next) => {
+  app.post("/api/asset-types", authenticate, isInternal, async (req, res, next) => {
     try {
       const { name } = req.body;
       if (!name) return res.status(400).json({ error: "Name is required" });
@@ -705,7 +738,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/asset-types/:id", authenticate, isStaff, async (req, res, next) => {
+  app.delete("/api/asset-types/:id", authenticate, isInternal, async (req, res, next) => {
     try {
       const { id } = req.params;
       
@@ -722,7 +755,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/assets", authenticate, isStaff, async (req, res, next) => {
+  app.post("/api/assets", authenticate, isInternal, async (req, res, next) => {
     try {
       const { name, brand, type, typeId, serialNo, quantity, status } = req.body;
       
@@ -750,7 +783,7 @@ async function startServer() {
   });
 
   // Asset Usage
-  app.post("/api/tickets/:id/usage", authenticate, isStaff, async (req: any, res, next) => {
+  app.post("/api/tickets/:id/usage", authenticate, isInternal, async (req: any, res, next) => {
     try {
       const { assetId, quantity } = req.body;
       const ticketId = req.params.id;
@@ -820,7 +853,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/assets/:id/maintenance", authenticate, isStaff, async (req, res, next) => {
+  app.post("/api/assets/:id/maintenance", authenticate, isInternal, async (req, res, next) => {
     try {
       const { type, scheduledDate, description } = req.body;
       const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
@@ -843,7 +876,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/assets/maintenance/:id", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/assets/maintenance/:id", authenticate, isInternal, async (req, res, next) => {
     try {
       const { status } = req.body;
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
@@ -946,7 +979,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/assets/requests/:id/fulfill", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/assets/requests/:id/fulfill", authenticate, isInternal, async (req, res, next) => {
     try {
       const requestId = req.params.id;
       const request = await prisma.assetRequest.findUnique({ 
@@ -990,16 +1023,16 @@ async function startServer() {
       if (!request) return res.status(404).json({ error: "Request not found" });
       if (request.status !== "fulfilled") return res.status(400).json({ error: "Only fulfilled requests can be returned" });
       
-      const isStaffAuthority = ["manager"].includes(req.user.role);
+      const isInternalAuthority = ["admin", "manager"].includes(req.user.role);
       const isOwner = request.userId === req.user.id;
 
-      if (!isStaffAuthority && !isOwner) {
+      if (!isInternalAuthority && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
       const updateData: any = {};
       if (isOwner) updateData.userReturned = true;
-      if (isStaffAuthority) updateData.staffReturned = true;
+      if (isInternalAuthority) updateData.staffReturned = true;
 
       const willBeReturned = (request.userReturned || updateData.userReturned) && 
                              (request.staffReturned || updateData.staffReturned);
@@ -1030,7 +1063,7 @@ async function startServer() {
       ]);
 
       // Notify managers if user returned
-      if (isOwner && !isStaffAuthority) {
+      if (isOwner && !isInternalAuthority) {
         const managers = await prisma.profile.findMany({
           where: { role: "manager" },
           select: { id: true }
@@ -1041,7 +1074,7 @@ async function startServer() {
       }
 
       // Notify user if staff returned
-      if (isStaffAuthority && !isOwner) {
+      if (isInternalAuthority && !isOwner) {
         await createNotification(request.userId, "Asset Return Confirmed", `Staff confirmed return for ${request.asset.name}.`, `/assets`);
       }
 
@@ -1052,7 +1085,7 @@ async function startServer() {
   });
 
   // Return Asset Usage
-  app.put("/api/assets/usage/:id/return", authenticate, isStaff, async (req: any, res, next) => {
+  app.put("/api/assets/usage/:id/return", authenticate, isInternal, async (req: any, res, next) => {
     try {
       const usageId = req.params.id;
       const usage = await prisma.assetUsage.findUnique({ 
@@ -1062,16 +1095,16 @@ async function startServer() {
       if (!usage) return res.status(404).json({ error: "Usage record not found" });
       if (usage.status === "returned") return res.status(400).json({ error: "Asset already returned" });
 
-      const isStaffAuthority = ["manager"].includes(req.user.role);
+      const isInternalAuthority = ["admin", "manager"].includes(req.user.role);
       const isOwner = usage.userId === req.user.id || usage.ticket.assignedTo === req.user.id;
 
-      if (!isStaffAuthority && !isOwner) {
+      if (!isInternalAuthority && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
       const updateData: any = {};
       if (isOwner) updateData.userReturned = true;
-      if (isStaffAuthority) updateData.staffReturned = true;
+      if (isInternalAuthority) updateData.staffReturned = true;
 
       const willBeReturned = (usage.userReturned || updateData.userReturned) && 
                              (usage.staffReturned || updateData.staffReturned);
@@ -1115,7 +1148,7 @@ async function startServer() {
   });
 
   // Update Asset (with restock notification)
-  app.put("/api/assets/:id", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/assets/:id", authenticate, isInternal, async (req, res, next) => {
     try {
       const { name, brand, type, typeId, serialNo, quantity, status } = req.body;
       const assetId = req.params.id;
@@ -1173,7 +1206,7 @@ async function startServer() {
   });
 
   // Delay reporting
-  app.put("/api/assets/maintenance/:id/delay", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/assets/maintenance/:id/delay", authenticate, isInternal, async (req, res, next) => {
     try {
       const { delayReason } = req.body;
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
@@ -1189,7 +1222,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/tickets/:id/delay", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/tickets/:id/delay", authenticate, isInternal, async (req, res, next) => {
     try {
       const { delayReason } = req.body;
       const exists = await prisma.ticket.findUnique({ where: { id: req.params.id } });
@@ -1257,7 +1290,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/maintenance", authenticate, isStaff, async (req, res, next) => {
+  app.post("/api/maintenance", authenticate, isInternal, async (req, res, next) => {
     try {
       const { title, description, startTime, endTime, type, technicianId, assetId } = req.body;
       const maintenance = await prisma.maintenance.create({ 
@@ -1278,7 +1311,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/maintenance/:id/status", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/maintenance/:id/status", authenticate, isInternal, async (req, res, next) => {
     try {
       const { status } = req.body;
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
@@ -1453,10 +1486,10 @@ async function startServer() {
       const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-      const isStaff = ["manager", "technician", "staff"].includes(req.user.role);
+      const isInternalUser = ["admin", "manager", "technician", "staff"].includes(req.user.role);
       const isOwner = ticket.userId === req.user.id;
 
-      if (!isStaff && !isOwner) {
+      if (!isInternalUser && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -1477,14 +1510,14 @@ async function startServer() {
       const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-      const isStaff = ["manager", "technician", "staff"].includes(req.user.role);
+      const isInternalUser = ["admin", "manager", "technician", "staff"].includes(req.user.role);
       const isOwner = ticket.userId === req.user.id;
 
       if (req.user.role === "technician" && ticket.assignedTo !== req.user.id) {
         return res.status(403).json({ error: "Technicians can only view history for assigned tickets" });
       }
 
-      if (!isStaff && !isOwner) {
+      if (!isInternalUser && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -1506,14 +1539,14 @@ async function startServer() {
       const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-      const isStaff = ["manager", "technician", "staff"].includes(req.user.role);
+      const isInternalUser = ["admin", "manager", "technician", "staff"].includes(req.user.role);
       const isOwner = ticket.userId === req.user.id;
 
       if (req.user.role === "technician" && ticket.assignedTo !== req.user.id) {
         return res.status(403).json({ error: "Technicians can only comment on assigned tickets" });
       }
 
-      if (!isStaff && !isOwner) {
+      if (!isInternalUser && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -1651,13 +1684,17 @@ async function startServer() {
   });
 
   if (process.env.NODE_ENV !== "production") {
+    console.log("🛠️ Initializing Vite in development mode...");
     const vite = await createViteServer({
+      root: path.resolve(process.cwd(), "client"),
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
+    console.log("✅ Vite middleware integrated.");
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    console.log("📦 Serving static files in production mode...");
+    const distPath = path.join(process.cwd(), "client", "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
@@ -1744,8 +1781,10 @@ async function startServer() {
   });
 
   httpServer.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
   });
 }
 
-startServer();
+startServer().catch(err => {
+  console.error("❌ Failed to start server:", err);
+});
