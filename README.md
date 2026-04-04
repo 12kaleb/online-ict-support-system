@@ -1,0 +1,23 @@
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+</div>
+
+# Run and deploy your AI Studio app
+
+This contains everything you need to run your app locally.
+
+View your app in AI Studio: https://ai.studio/apps/63a785f4-e0a6-4ffb-beb6-b6991947f2bc
+
+## Run Locally
+
+**Prerequisites:**  Node.js
+
+
+1. Install dependencies:
+   `npm install`
+2. Set the environment variables in `.env`:
+   `DATABASE_URL` should be your Supabase session pooler URL
+   `DIRECT_URL` can optionally be your Supabase direct database URL for Prisma operations
+   `GEMINI_API_KEY` should be your Gemini API key
+3. Run the app:
+   `npm run dev`
