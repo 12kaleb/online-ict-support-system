@@ -1,6 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import * as dotenv from "dotenv";
-import { supabaseAdmin } from "../supabase";
+import bcrypt from "bcryptjs";
 
 dotenv.config();
 
@@ -58,77 +58,31 @@ function getSeedPassword(envName: string) {
 
 async function upsertAuthUser(user: SeedUser) {
   const password = getSeedPassword(user.passwordEnv);
-  const {
-    data: { users },
-    error: listError,
-  } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
-
-  if (listError) {
-    throw listError;
-  }
-
-  const existingUser = users.find((authUser: any) => authUser.email?.toLowerCase() === user.email.toLowerCase());
-
-  if (existingUser) {
-    const { data, error } = await supabaseAdmin.auth.admin.updateUserById(existingUser.id, {
-      email: user.email,
-      password,
-      email_confirm: true,
-      user_metadata: {
-        name: user.name,
-        department: user.department,
-        role: user.role,
-      },
-    });
-
-    if (error || !data.user) {
-      throw error || new Error(`Failed to update auth user for ${user.email}`);
-    }
-
-    return data.user;
-  }
-
-  const { data, error } = await supabaseAdmin.auth.admin.createUser({
-    email: user.email,
-    password,
-    email_confirm: true,
-    user_metadata: {
-      name: user.name,
-      department: user.department,
-      role: user.role,
-    },
-  });
-
-  if (error || !data.user) {
-    throw error || new Error(`Failed to create auth user for ${user.email}`);
-  }
-
-  return data.user;
+  return {
+    email: user.email.toLowerCase(),
+    passwordHash: await bcrypt.hash(password, 12),
+  };
 }
 
 async function main() {
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error("SUPABASE_SERVICE_ROLE_KEY is required to seed auth users.");
-  }
-
   for (const user of seedUsers) {
     const authUser = await upsertAuthUser(user);
 
     const profile = await prisma.profile.upsert({
-      where: { email: user.email },
+      where: { email: authUser.email },
       update: {
-        id: authUser.id,
         name: user.name,
-        email: user.email,
+        email: authUser.email,
         role: user.role,
         department: user.department,
+        passwordHash: authUser.passwordHash,
       },
       create: {
-        id: authUser.id,
         name: user.name,
-        email: user.email,
+        email: authUser.email,
         role: user.role,
         department: user.department,
+        passwordHash: authUser.passwordHash,
       },
     });
 

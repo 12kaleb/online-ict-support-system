@@ -16,8 +16,9 @@ This contains everything you need to run your app locally.
 1. Install dependencies:
    `npm install`
 2. Set the environment variables in `.env`:
-   `DATABASE_URL` should be your Supabase session pooler URL
-   `DIRECT_URL` can optionally be your Supabase direct database URL for Prisma operations
+   `DATABASE_URL` should be your PostgreSQL connection string
+   `DIRECT_URL` can optionally be a direct PostgreSQL connection string for Prisma operations
    `GEMINI_API_KEY` should be your Gemini API key
+   `JWT_SECRET` should be a strong secret used to sign auth cookies
 3. Run the app:
    `npm run dev`

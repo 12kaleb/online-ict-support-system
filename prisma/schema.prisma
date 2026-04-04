@@ -8,13 +8,13 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
 }
 
 model Profile {
   id            String         @id @default(uuid())
   name          String
   email         String         @unique
+  passwordHash  String?
   role          String         @default("staff") // staff, technician, manager
   department    String?
   createdAt     DateTime       @default(now())

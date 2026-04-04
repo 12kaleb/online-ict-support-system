@@ -10,7 +10,7 @@ export default function Admin() {
   const { t } = useTranslation();
   const [users, setUsers] = useState<any[]>([]);
   const [open, setOpen] = useState(false);
-  const [newUser, setNewUser] = useState({ name: '', email: '', role: 'technician', department: '' });
+  const [newUser, setNewUser] = useState({ name: '', email: '', role: 'technician', department: '', password: '' });
   const [loading, setLoading] = useState(false);
 
   // Search and Filter state
@@ -70,9 +70,9 @@ export default function Admin() {
         body: JSON.stringify(newUser),
       });
       await handleResponse(res);
-      toast.success('User created and setup email sent');
+      toast.success('User created successfully');
       setOpen(false);
-      setNewUser({ name: '', email: '', role: 'technician', department: '' });
+      setNewUser({ name: '', email: '', role: 'technician', department: '', password: '' });
       fetchUsers();
     } catch (err: any) {
       toast.error(err.message || 'Failed to add user');
@@ -403,6 +403,18 @@ export default function Admin() {
                       <option value="technician">{t('Technician')}</option>
                       <option value="manager">{t('Manager')}</option>
                     </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 ml-1">{t('Password')}</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={6}
+                      value={newUser.password}
+                      onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                      className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none text-slate-900 dark:text-white"
+                      placeholder={t('Minimum 6 characters')}
+                    />
                   </div>
 
                   <div className="flex gap-3 pt-4">

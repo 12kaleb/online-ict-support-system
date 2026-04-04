@@ -6,18 +6,18 @@ import path from "path";
 import { appendFile, mkdir } from "fs/promises";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import { supabase, supabaseAdmin } from "./supabase";
 import { PrismaClient, Prisma } from "@prisma/client";
 import * as dotenv from "dotenv";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 dotenv.config();
 
 if (!process.env.DATABASE_URL) {
-  console.warn("⚠️ WARNING: DATABASE_URL environment variable is not set. Database connection will fail.");
-  console.log("💡 To connect to your Supabase database, add the following to your AI Studio Secrets:");
-  console.log("   DATABASE_URL=postgresql://postgres:%40%23Kaleb1301@db.qmmojzifrvtkvlysjpbh.supabase.co:5432/postgres?sslmode=require");
+  console.warn("WARNING: DATABASE_URL environment variable is not set. Database connection will fail.");
+  console.log("Set DATABASE_URL to your PostgreSQL connection string before starting the server.");
 } else if (process.env.DATABASE_URL.includes("localhost:5432")) {
-  console.warn("⚠️ WARNING: DATABASE_URL is set to 'localhost:5432'. This will fail in the AI Studio environment. Please provide a real PostgreSQL connection string.");
+  console.warn("WARNING: DATABASE_URL is set to 'localhost:5432'. This will fail in the AI Studio environment. Please provide a real PostgreSQL connection string.");
 }
 
 const prisma = new PrismaClient();
@@ -28,73 +28,47 @@ const isTechnicianRole = (role?: string) => role === "technician" || isManagerRo
 const isStaffRole = (role?: string) => role === "staff" || isTechnicianRole(role);
 
 const allowedRoles = new Set(["staff", "technician", "manager", "admin"]);
+const PASSWORD_MIN_LENGTH = 6;
+const JWT_COOKIE_NAME = "token";
+const isProduction = process.env.NODE_ENV === "production";
+const cookieOptions = {
+  httpOnly: true,
+  secure: isProduction,
+  sameSite: (isProduction ? "none" : "lax") as const,
+};
 
-async function listAuthUsers() {
-  const {
-    data: { users },
-    error,
-  } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+type AuthTokenPayload = {
+  sub: string;
+  email: string;
+  role: string;
+};
 
-  if (error) {
-    throw error;
-  }
-
-  return users;
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
 }
 
-async function findAuthUserByEmail(email: string) {
-  const users = await listAuthUsers();
-  return users.find((user: any) => user.email?.toLowerCase() === email.toLowerCase()) || null;
+function isValidPassword(password?: string) {
+  return typeof password === "string" && password.length >= PASSWORD_MIN_LENGTH;
 }
 
-async function findAuthUserById(id: string) {
-  const users = await listAuthUsers();
-  return users.find((user: any) => user.id === id) || null;
+function signAuthToken(profile: { id: string; email: string; role: string }) {
+  return jwt.sign(
+    {
+      sub: profile.id,
+      email: profile.email,
+      role: profile.role,
+    } satisfies AuthTokenPayload,
+    JWT_SECRET,
+    { expiresIn: "30d" },
+  );
 }
 
-async function ensureProfileForAuthUser(authUser: any) {
-  if (!authUser?.id || !authUser?.email) {
-    return null;
-  }
+function verifyAuthToken(token: string) {
+  return jwt.verify(token, JWT_SECRET) as AuthTokenPayload;
+}
 
-  const metadata = authUser.user_metadata || {};
-  const resolvedRole = allowedRoles.has(metadata.role) ? metadata.role : "staff";
-
-  const existingById = await prisma.profile.findUnique({ where: { id: authUser.id } });
-  if (existingById) {
-    return prisma.profile.update({
-      where: { id: authUser.id },
-      data: {
-        name: metadata.name || existingById.name,
-        email: authUser.email,
-        department: metadata.department ?? existingById.department,
-        role: resolvedRole || existingById.role,
-      },
-    });
-  }
-
-  const existingByEmail = await prisma.profile.findUnique({ where: { email: authUser.email } });
-  if (existingByEmail) {
-    return prisma.profile.update({
-      where: { email: authUser.email },
-      data: {
-        id: authUser.id,
-        name: metadata.name || existingByEmail.name,
-        department: metadata.department ?? existingByEmail.department,
-        role: resolvedRole || existingByEmail.role,
-      },
-    });
-  }
-
-  return prisma.profile.create({
-    data: {
-      id: authUser.id,
-      name: metadata.name || authUser.email.split("@")[0],
-      email: authUser.email,
-      department: metadata.department || null,
-      role: resolvedRole,
-    },
-  });
+async function hashPassword(password: string) {
+  return bcrypt.hash(password, 12);
 }
 
 async function writeAuditLog(actor: any, action: string, details: Record<string, unknown>) {
@@ -202,18 +176,21 @@ async function startServer() {
 
   // --- Auth Middleware ---
   const authenticate = async (req: any, res: any, next: any) => {
-    const token = req.cookies.token;
+    const token = req.cookies[JWT_COOKIE_NAME];
     if (!token) return res.status(401).json({ error: "Unauthorized" });
     try {
-      const { data: { user }, error } = await supabase.auth.getUser(token);
-      if (error || !user) throw error;
-      if (!user.email_confirmed_at) return res.status(401).json({ error: "Email not verified" });
-      
-      // Ensure a verified auth user always has an app profile.
-      const profile = await ensureProfileForAuthUser(user);
+      const payload = verifyAuthToken(token);
+      const profile = await prisma.profile.findUnique({ where: { id: payload.sub } });
       if (!profile) return res.status(401).json({ error: "Profile not found" });
-      
-      req.user = { ...user, ...profile };
+
+      req.user = {
+        id: profile.id,
+        email: profile.email,
+        role: profile.role,
+        name: profile.name,
+        department: profile.department,
+        createdAt: profile.createdAt,
+      };
       next();
     } catch (err) {
       res.status(401).json({ error: "Invalid token" });
@@ -326,32 +303,42 @@ async function startServer() {
   app.post("/api/auth/register", async (req, res, next) => {
     const { name, email, password, department } = req.body;
     try {
-      const existingAuthUser = await findAuthUserByEmail(email);
-      if (existingAuthUser) {
-        if (existingAuthUser.email_confirmed_at) {
-          return res.status(400).json({ error: "A user with this email already exists." });
-        }
-
-        return res.status(400).json({ error: "This account is registered but email verification is still pending. Please verify your email first." });
+      const normalizedEmail = normalizeEmail(email || "");
+      if (!name || !normalizedEmail || !department) {
+        return res.status(400).json({ error: "Name, email, and department are required." });
+      }
+      if (!isValidPassword(password)) {
+        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.` });
       }
 
-      const existingProfile = await prisma.profile.findUnique({ where: { email } });
+      const existingProfile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
       if (existingProfile) {
         return res.status(400).json({ error: "A user with this email already exists." });
       }
 
-      const { data, error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: { name, department, role: "staff" }
-        }
+      const existingUserCount = await prisma.profile.count();
+      const role = normalizedEmail === "kalebteshome94@gmail.com" || existingUserCount === 0 ? "admin" : "staff";
+      const profile = await prisma.profile.create({
+        data: {
+          name,
+          email: normalizedEmail,
+          department,
+          role,
+          passwordHash: await hashPassword(password),
+        },
       });
 
-      if (error) return res.status(400).json({ error: error.message });
-      if (!data.user) return res.status(400).json({ error: "Signup failed" });
-
-      res.json({ message: "Registration successful. Please check your email for verification before signing in." });
+      res.json({
+        message: "Registration successful. Please login.",
+        user: {
+          id: profile.id,
+          name: profile.name,
+          email: profile.email,
+          role: profile.role,
+          department: profile.department,
+          createdAt: profile.createdAt,
+        },
+      });
     } catch (err) {
       next(err);
     }
@@ -360,79 +347,93 @@ async function startServer() {
   app.post("/api/auth/login", async (req, res, next) => {
     const { email, password, rememberMe } = req.body;
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password
-      });
-
-      if (error) return res.status(401).json({ error: error.message });
-      if (!data.user || !data.session) return res.status(401).json({ error: "Login failed" });
-      if (!data.user.email_confirmed_at) {
-        return res.status(403).json({ error: "Please verify your email address before signing in." });
+      const normalizedEmail = normalizeEmail(email || "");
+      const profile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
+      if (!profile?.passwordHash) {
+        return res.status(401).json({ error: "Invalid email or password" });
       }
 
-      const profile = await ensureProfileForAuthUser(data.user);
-      if (!profile) return res.status(401).json({ error: "Profile not found" });
+      const passwordMatches = await bcrypt.compare(password || "", profile.passwordHash);
+      if (!passwordMatches) {
+        return res.status(401).json({ error: "Invalid email or password" });
+      }
 
       const maxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
-      res.cookie("token", data.session.access_token, { 
-        httpOnly: true, 
-        secure: true, 
-        sameSite: "none", 
-        maxAge 
+      res.cookie(JWT_COOKIE_NAME, signAuthToken(profile), {
+        ...cookieOptions,
+        maxAge,
       });
 
-      res.json(profile);
+      res.json({
+        id: profile.id,
+        name: profile.name,
+        email: profile.email,
+        role: profile.role,
+        department: profile.department,
+        createdAt: profile.createdAt,
+      });
     } catch (err) {
       next(err);
     }
   });
 
   // Admin: Create Technician or Manager
-  app.post("/api/admin/create-user", authenticate, isAdmin, async (req, res, next) => {
-    const { email, name, role, department } = req.body;
+  app.post(["/api/admin/create-user", "/api/auth/admin/create-user"], authenticate, isAdmin, async (req, res, next) => {
+    const { email, name, role, department, password } = req.body;
     
     if (!["technician", "manager"].includes(role)) {
       return res.status(400).json({ error: "Invalid role for manager creation" });
     }
 
     try {
-      const existingAuthUser = await findAuthUserByEmail(email);
-      if (existingAuthUser?.email_confirmed_at) {
-        return res.status(400).json({ error: "A user with this email already exists." });
+      const normalizedEmail = normalizeEmail(email || "");
+      if (!name || !normalizedEmail || !department) {
+        return res.status(400).json({ error: "Name, email, and department are required." });
       }
-      if (existingAuthUser) {
-        return res.status(400).json({ error: "An invitation is already pending for this email." });
+      if (!isValidPassword(password)) {
+        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.` });
       }
 
-      const existingProfile = await prisma.profile.findUnique({ where: { email } });
+      const existingProfile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
       if (existingProfile) {
         return res.status(400).json({ error: "A user with this email already exists." });
       }
 
-      const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-        redirectTo: `${process.env.APP_URL || ""}/login`,
-        data: { name, department, role }
+      const profile = await prisma.profile.create({
+        data: {
+          name,
+          email: normalizedEmail,
+          role,
+          department,
+          passwordHash: await hashPassword(password),
+        },
       });
 
-      if (error) return res.status(400).json({ error: error.message });
-      if (!data.user) return res.status(400).json({ error: "User invitation failed" });
-
       await writeAuditLog((req as any).user, "user.invited", {
-        email,
+        email: normalizedEmail,
         name,
         role,
         department,
       });
 
-      res.json({ message: "User invited successfully. They must verify their email and set a password before signing in." });
+      res.json({
+        message: "User created successfully.",
+        user: {
+          id: profile.id,
+          name: profile.name,
+          email: profile.email,
+          role: profile.role,
+          department: profile.department,
+          createdAt: profile.createdAt,
+        },
+      });
     } catch (err) {
       next(err);
     }
   });
 
   app.post("/api/auth/logout", (req, res) => {
-    res.clearCookie("token");
+    res.clearCookie(JWT_COOKIE_NAME, cookieOptions);
     res.json({ message: "Logged out" });
   });
 
@@ -1726,14 +1727,28 @@ async function startServer() {
   app.post("/api/users", authenticate, isAdmin, async (req, res, next) => {
     const { name, email, password, role, department } = req.body;
     try {
+      const normalizedEmail = normalizeEmail(email || "");
+      if (!name || !normalizedEmail) {
+        return res.status(400).json({ error: "Name and email are required" });
+      }
+      if (!isValidPassword(password)) {
+        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.` });
+      }
+
       // Check if user already exists
-      const existingUser = await prisma.profile.findUnique({ where: { email } });
+      const existingUser = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
       if (existingUser) {
         return res.status(400).json({ error: "Email already in use" });
       }
 
       const user = await prisma.profile.create({
-        data: { name, email, role: role || "staff", department },
+        data: {
+          name,
+          email: normalizedEmail,
+          role: allowedRoles.has(role) ? role : "staff",
+          department,
+          passwordHash: await hashPassword(password),
+        },
       });
       res.json(user);
     } catch (err) {
@@ -1747,9 +1762,29 @@ async function startServer() {
       const exists = await prisma.profile.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "User not found" });
 
+      const normalizedEmail = normalizeEmail(email || "");
+      if (!name || !normalizedEmail) {
+        return res.status(400).json({ error: "Name and email are required" });
+      }
+
+      const duplicate = await prisma.profile.findFirst({
+        where: {
+          email: normalizedEmail,
+          NOT: { id: req.params.id },
+        },
+      });
+      if (duplicate) {
+        return res.status(400).json({ error: "Email already in use" });
+      }
+
       const user = await prisma.profile.update({
         where: { id: req.params.id },
-        data: { name, email, role, department },
+        data: {
+          name,
+          email: normalizedEmail,
+          role: role && allowedRoles.has(role) ? role : exists.role,
+          department,
+        },
       });
       await writeAuditLog((req as any).user, "user.updated", {
         targetUserId: req.params.id,
@@ -1769,6 +1804,9 @@ async function startServer() {
     try {
       const exists = await prisma.profile.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "User not found" });
+      if (!allowedRoles.has(role)) {
+        return res.status(400).json({ error: "Invalid role" });
+      }
 
       const user = await prisma.profile.update({
         where: { id: req.params.id },
@@ -1789,19 +1827,16 @@ async function startServer() {
     try {
       const exists = await prisma.profile.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "User not found" });
-
-      const authUser = await findAuthUserById(req.params.id);
-      if (!authUser) return res.status(404).json({ error: "Auth user not found" });
-      if (!authUser.email_confirmed_at) {
-        return res.status(400).json({ error: "Cannot reset password until the user confirms their email address." });
+      if (!isValidPassword(password)) {
+        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.` });
       }
 
-      // Update password in Supabase Auth
-      const { error } = await supabaseAdmin.auth.admin.updateUserById(req.params.id, {
-        password
+      await prisma.profile.update({
+        where: { id: req.params.id },
+        data: {
+          passwordHash: await hashPassword(password),
+        },
       });
-
-      if (error) return res.status(400).json({ error: error.message });
 
       await writeAuditLog((req as any).user, "user.password_reset", {
         targetUserId: req.params.id,
@@ -1832,10 +1867,6 @@ async function startServer() {
       if (assignedOpenTickets > 0 || requestedOpenTickets > 0 || activeMaintenance > 0) {
         return res.status(400).json({ error: "Cannot delete a user with active tickets or maintenance assignments" });
       }
-
-      // Also delete from Supabase Auth
-      const { error } = await supabaseAdmin.auth.admin.deleteUser(id);
-      if (error) console.error("Failed to delete user from Supabase Auth:", error);
 
       await prisma.profile.delete({ where: { id } });
       await writeAuditLog((req as any).user, "user.deleted", {

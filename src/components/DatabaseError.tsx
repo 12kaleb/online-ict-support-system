@@ -38,7 +38,7 @@ export default function DatabaseError({ error, code, onRetry }: DatabaseErrorPro
             <ol className="space-y-3 text-sm font-medium text-slate-600 dark:text-slate-300 list-decimal pl-4">
               <li>Open the <strong className="text-slate-900 dark:text-white">Secrets</strong> panel in AI Studio.</li>
               <li>Add or update the <strong className="text-slate-900 dark:text-white">DATABASE_URL</strong> secret.</li>
-              <li className="break-all">Use your Supabase URL: <code className="bg-white dark:bg-slate-900 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 text-blue-600 dark:text-blue-400 text-xs font-mono">postgresql://postgres:%40%23Kaleb1301@db.qmmojzifrvtkvlysjpbh.supabase.co:5432/postgres?sslmode=require</code></li>
+              <li className="break-all">Use your PostgreSQL connection string in <code className="bg-white dark:bg-slate-900 px-2 py-1 rounded border border-slate-200 dark:border-slate-700 text-blue-600 dark:text-blue-400 text-xs font-mono">DATABASE_URL</code>.</li>
               <li>Restart the development server.</li>
             </ol>
           </div>
