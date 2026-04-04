@@ -148,6 +148,7 @@ async function deleteAssetCatalogIfEmpty(catalogId?: string | null) {
 }
 
 async function startServer() {
+  const frontendRoot = path.resolve(process.cwd(), "../frontend");
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
@@ -2096,12 +2097,13 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
+      root: frontendRoot,
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    const distPath = path.join(frontendRoot, "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));

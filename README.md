@@ -4,7 +4,10 @@
 
 
 
-This contains everything you need to run your app locally.
+This repository is organized into separate deployment-friendly app folders:
+
+- `frontend/` for the React/Vite client
+- `backend/` for the Express/Prisma API
 
 
 
@@ -13,12 +16,14 @@ This contains everything you need to run your app locally.
 **Prerequisites:**  Node.js
 
 
-1. Install dependencies:
-   `npm install`
-2. Set the environment variables in `.env`:
+1. Install backend dependencies:
+   `cd backend && npm install`
+2. Install frontend dependencies:
+   `cd frontend && npm install`
+3. Set backend environment variables in `backend/.env`:
    `DATABASE_URL` should be your PostgreSQL connection string
-   `DIRECT_URL` can optionally be a direct PostgreSQL connection string for Prisma operations
-   `GEMINI_API_KEY` should be your Gemini API key
    `JWT_SECRET` should be a strong secret used to sign auth cookies
-3. Run the app:
-   `npm run dev`
+4. Run the backend:
+   `npm run dev:backend`
+5. Run the frontend:
+   `npm run dev:frontend`
