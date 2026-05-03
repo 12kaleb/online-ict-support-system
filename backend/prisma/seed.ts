@@ -1,11 +1,38 @@
 import { PrismaClient } from "@prisma/client";
 import * as dotenv from "dotenv";
+import bcrypt from "bcryptjs";
+import { getSeedPassword, seedUsers } from "./seed-data.js";
 
 dotenv.config();
 
 const prisma = new PrismaClient();
 
 async function main() {
+  console.log("Seeding default users...");
+  for (const user of seedUsers) {
+    const email = user.email.toLowerCase();
+    const passwordHash = await bcrypt.hash(getSeedPassword(user.passwordEnv), 12);
+    await prisma.profile.upsert({
+      where: { email },
+      update: {
+        name: user.name,
+        email,
+        role: user.role,
+        status: "active",
+        department: user.department,
+        passwordHash,
+      },
+      create: {
+        name: user.name,
+        email,
+        role: user.role,
+        status: "active",
+        department: user.department,
+        passwordHash,
+      },
+    });
+  }
+
   const faqs = [
     {
       question: "How do I reset my password?",

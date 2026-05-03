@@ -11,6 +11,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["*.ts", "prisma/**/*.ts"],
+  "include": ["*.ts", "prisma/**/*.ts", "schemas/**/*.ts", "services/**/*.ts"],
   "exclude": ["node_modules"]
 }

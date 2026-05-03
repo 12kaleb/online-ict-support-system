@@ -1,15 +1,20 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import path from "path";
-import { appendFile, mkdir } from "fs/promises";
+import { appendFile, mkdir, readFile } from "fs/promises";
+import { randomBytes } from "crypto";
+import { exec, execFile } from "child_process";
+import { promisify } from "util";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { PrismaClient, Prisma } from "@prisma/client";
 import * as dotenv from "dotenv";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { ZodError } from "zod";
+import { allowedEmailSchema, inviteUserSchema, loginSchema, registerSchema, setupPasswordSchema } from "./schemas/auth.js";
+import { buildInviteUrl, sendInviteEmail } from "./services/invitations.js";
 
 dotenv.config();
 
@@ -21,21 +26,99 @@ if (!process.env.DATABASE_URL) {
 }
 
 const prisma = new PrismaClient();
+const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const JWT_SECRET = process.env.JWT_SECRET || "ict-support-secret-key-123";
+const INVITE_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
 const isAdminRole = (role?: string) => role === "admin";
 const isManagerRole = (role?: string) => role === "manager" || role === "admin";
 const isTechnicianRole = (role?: string) => role === "technician" || isManagerRole(role);
 const isStaffRole = (role?: string) => role === "staff" || isTechnicianRole(role);
+const isActiveStatus = (status?: string) => status === "active";
 
 const allowedRoles = new Set(["staff", "technician", "manager", "admin"]);
+const privilegedInviteRoles = new Set(["manager", "technician"]);
 const PASSWORD_MIN_LENGTH = 6;
 const JWT_COOKIE_NAME = "token";
+const HIGH_PRIORITY_LEVELS = new Set(["high", "critical"]);
+const TICKET_TEMPLATES: Record<string, { category: string; title: string; description: string; priority: string }> = {
+  network: {
+    category: "Network",
+    title: "Network connectivity issue",
+    description: "Describe the location, affected device, error message, and whether other users are impacted.",
+    priority: "high",
+  },
+  hardware: {
+    category: "Hardware",
+    title: "Hardware fault or damage",
+    description: "Describe the device, symptoms, and whether the device is still usable.",
+    priority: "medium",
+  },
+  account: {
+    category: "Account/Access",
+    title: "Account or access issue",
+    description: "Describe the account, affected system, and what access is missing or failing.",
+    priority: "medium",
+  },
+  software: {
+    category: "Software",
+    title: "Software/application issue",
+    description: "Describe the application, steps taken, and exact error shown.",
+    priority: "medium",
+  },
+};
 const isProduction = process.env.NODE_ENV === "production";
-const cookieOptions = {
+const cookieOptions: {
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: "none" | "lax";
+} = {
   httpOnly: true,
   secure: isProduction,
-  sameSite: (isProduction ? "none" : "lax") as const,
+  sameSite: isProduction ? "none" : "lax",
 };
+
+function isMissingTableError(err: unknown) {
+  if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    return err.code === "P2021";
+  }
+
+  if (err instanceof Error) {
+    return err.message.includes("does not exist in the current database");
+  }
+
+  return false;
+}
+
+async function ensureDatabaseSchema() {
+  console.warn("Missing Prisma tables detected. Running `prisma db push` to sync the schema...");
+  const result = process.platform === "win32"
+    ? await execAsync("cmd.exe /c prisma db push --skip-generate", {
+        cwd: process.cwd(),
+        env: process.env,
+        timeout: 120000,
+      })
+    : await execFileAsync(
+        path.join(process.cwd(), "node_modules", ".bin", "prisma"),
+        ["db", "push", "--skip-generate"],
+        {
+          cwd: process.cwd(),
+          env: process.env,
+          timeout: 120000,
+        },
+      );
+
+  const stdout = result.stdout ?? "";
+  const stderr = result.stderr ?? "";
+
+  if (stdout.trim()) {
+    console.log(stdout.trim());
+  }
+
+  if (stderr.trim()) {
+    console.warn(stderr.trim());
+  }
+}
 
 type AuthTokenPayload = {
   sub: string;
@@ -47,8 +130,33 @@ function normalizeEmail(email: string) {
   return email.trim().toLowerCase();
 }
 
+function getSLADurationMs(priority?: string) {
+  switch (priority) {
+    case "critical":
+      return 4 * 60 * 60 * 1000;
+    case "high":
+      return 24 * 60 * 60 * 1000;
+    case "medium":
+      return 3 * 24 * 60 * 60 * 1000;
+    default:
+      return 7 * 24 * 60 * 60 * 1000;
+  }
+}
+
+function getSLADueDate(priority?: string, from = new Date()) {
+  return new Date(from.getTime() + getSLADurationMs(priority));
+}
+
 function isValidPassword(password?: string) {
   return typeof password === "string" && password.length >= PASSWORD_MIN_LENGTH;
+}
+
+function normalizeStatus(value?: string) {
+  return value?.trim().toLowerCase();
+}
+
+function shouldRequireClosureApproval(ticket: { priority?: string }) {
+  return HIGH_PRIORITY_LEVELS.has(ticket.priority || "");
 }
 
 function signAuthToken(profile: { id: string; email: string; role: string }) {
@@ -69,6 +177,11 @@ function verifyAuthToken(token: string) {
 
 async function hashPassword(password: string) {
   return bcrypt.hash(password, 12);
+}
+
+function formatValidationError(error: ZodError) {
+  const issue = error.issues[0];
+  return issue?.message || "Invalid request payload.";
 }
 
 async function writeAuditLog(actor: any, action: string, details: Record<string, unknown>) {
@@ -147,8 +260,67 @@ async function deleteAssetCatalogIfEmpty(catalogId?: string | null) {
   }
 }
 
+async function logAssetHistory(
+  assetId: string,
+  action: string,
+  details?: string,
+  options?: {
+    userId?: string | null;
+    ticketId?: string | null;
+    maintenanceId?: string | null;
+  },
+) {
+  try {
+    await prisma.assetHistory.create({
+      data: {
+        assetId,
+        action,
+        details,
+        userId: options?.userId || null,
+        ticketId: options?.ticketId || null,
+        maintenanceId: options?.maintenanceId || null,
+      },
+    });
+  } catch (err) {
+    console.error("Failed to log asset history:", err);
+  }
+}
+
+async function ensureApprovalRequest(input: {
+  type: string;
+  requestedById: string;
+  reason?: string;
+  ticketId?: string | null;
+  assetId?: string | null;
+  maintenanceId?: string | null;
+}) {
+  const existing = await prisma.approvalRequest.findFirst({
+    where: {
+      type: input.type,
+      status: "pending",
+      ticketId: input.ticketId || null,
+      assetId: input.assetId || null,
+      maintenanceId: input.maintenanceId || null,
+    },
+  });
+
+  if (existing) {
+    return existing;
+  }
+
+  return prisma.approvalRequest.create({
+    data: {
+      type: input.type,
+      requestedById: input.requestedById,
+      reason: input.reason,
+      ticketId: input.ticketId || null,
+      assetId: input.assetId || null,
+      maintenanceId: input.maintenanceId || null,
+    },
+  });
+}
+
 async function startServer() {
-  const frontendRoot = path.resolve(process.cwd(), "../frontend");
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
@@ -174,6 +346,7 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ limit: '50mb', extended: true }));
   app.use(cookieParser());
+  app.set("trust proxy", 1);
 
   // --- Auth Middleware ---
   const authenticate = async (req: any, res: any, next: any) => {
@@ -183,11 +356,15 @@ async function startServer() {
       const payload = verifyAuthToken(token);
       const profile = await prisma.profile.findUnique({ where: { id: payload.sub } });
       if (!profile) return res.status(401).json({ error: "Profile not found" });
+      if (!isActiveStatus(profile.status)) {
+        return res.status(403).json({ error: "Your account is not active." });
+      }
 
       req.user = {
         id: profile.id,
         email: profile.email,
         role: profile.role,
+        status: profile.status,
         name: profile.name,
         department: profile.department,
         createdAt: profile.createdAt,
@@ -242,30 +419,57 @@ async function startServer() {
         where: {
           status: { notIn: ["closed", "resolved"] },
           dueDate: { not: null }
-        }
+        },
+        include: {
+          user: { select: { name: true } },
+        },
       });
 
       for (const ticket of openTickets as any[]) {
         if (!ticket.dueDate) continue;
         const dueDate = new Date(ticket.dueDate);
         let newStatus = ticket.slaStatus;
+        let escalationLevel = ticket.escalationLevel || 0;
 
-        if (now > dueDate) {
+        if (ticket.slaPaused) {
+          newStatus = "paused";
+        } else if (now > dueDate) {
           newStatus = "breached";
+          escalationLevel = 2;
         } else {
           const hoursRemaining = (dueDate.getTime() - now.getTime()) / (1000 * 60 * 60);
           if (hoursRemaining < 2) {
             newStatus = "at-risk";
+            escalationLevel = Math.max(escalationLevel, 1);
           } else {
             newStatus = "on-track";
           }
         }
 
-        if (newStatus !== ticket.slaStatus) {
+        if (newStatus !== ticket.slaStatus || escalationLevel !== (ticket.escalationLevel || 0)) {
           await prisma.ticket.update({
             where: { id: ticket.id },
-            data: { slaStatus: newStatus }
+            data: {
+              slaStatus: newStatus,
+              escalationLevel,
+              escalatedAt: newStatus === "at-risk" || newStatus === "breached" ? now : null,
+            }
           });
+
+          if (newStatus === "at-risk" || newStatus === "breached") {
+            const managers = await prisma.profile.findMany({
+              where: { role: { in: ["manager", "admin"] } },
+              select: { id: true },
+            });
+            for (const manager of managers) {
+              await createNotification(
+                manager.id,
+                newStatus === "breached" ? "SLA Breached" : "Ticket At Risk",
+                `${ticket.user?.name || "A user"}'s ticket "${ticket.title}" is ${newStatus}.`,
+                `/tickets/${ticket.id}`,
+              );
+            }
+          }
         }
       }
     } catch (err) {
@@ -302,40 +506,58 @@ async function startServer() {
 
   // Auth
   app.post("/api/auth/register", async (req, res, next) => {
-    const { name, email, password, department } = req.body;
     try {
-      const normalizedEmail = normalizeEmail(email || "");
-      if (!name || !normalizedEmail || !department) {
-        return res.status(400).json({ error: "Name, email, and department are required." });
-      }
-      if (!isValidPassword(password)) {
-        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.` });
+      const parsed = registerSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: formatValidationError(parsed.error) });
       }
 
+      const { name, email, password, department } = parsed.data;
+      const normalizedEmail = normalizeEmail(email);
       const existingProfile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
       if (existingProfile) {
         return res.status(400).json({ error: "A user with this email already exists." });
       }
 
-      const existingUserCount = await prisma.profile.count();
-      const role = normalizedEmail === "kalebteshome94@gmail.com" || existingUserCount === 0 ? "admin" : "staff";
+      const passwordHash = await hashPassword(password);
       const profile = await prisma.profile.create({
         data: {
           name,
           email: normalizedEmail,
           department,
-          role,
-          passwordHash: await hashPassword(password),
+          role: "staff",
+          status: "pending",
+          passwordHash,
         },
       });
 
+      const admins = await prisma.profile.findMany({
+        where: {
+          role: "admin",
+          status: "active",
+        },
+        select: { id: true },
+      });
+
+      await Promise.all(
+        admins.map((admin) =>
+          createNotification(
+            admin.id,
+            "New staff signup pending approval",
+            `${profile.name} (${profile.email}) has requested staff access and is waiting for approval.`,
+            "/admin",
+          ),
+        ),
+      );
+
       res.json({
-        message: "Registration successful. Please login.",
+        message: "Registration submitted. An administrator must approve your account before you can sign in.",
         user: {
           id: profile.id,
           name: profile.name,
           email: profile.email,
           role: profile.role,
+          status: profile.status,
           department: profile.department,
           createdAt: profile.createdAt,
         },
@@ -346,15 +568,23 @@ async function startServer() {
   });
 
   app.post("/api/auth/login", async (req, res, next) => {
-    const { email, password, rememberMe } = req.body;
     try {
-      const normalizedEmail = normalizeEmail(email || "");
+      const parsed = loginSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: formatValidationError(parsed.error) });
+      }
+
+      const { email, password, rememberMe } = parsed.data;
+      const normalizedEmail = normalizeEmail(email);
       const profile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
       if (!profile?.passwordHash) {
         return res.status(401).json({ error: "Invalid email or password" });
       }
+      if (!isActiveStatus(profile.status)) {
+        return res.status(403).json({ error: "Your account is pending admin approval." });
+      }
 
-      const passwordMatches = await bcrypt.compare(password || "", profile.passwordHash);
+      const passwordMatches = await bcrypt.compare(password, profile.passwordHash);
       if (!passwordMatches) {
         return res.status(401).json({ error: "Invalid email or password" });
       }
@@ -370,6 +600,7 @@ async function startServer() {
         name: profile.name,
         email: profile.email,
         role: profile.role,
+        status: profile.status,
         department: profile.department,
         createdAt: profile.createdAt,
       });
@@ -378,36 +609,71 @@ async function startServer() {
     }
   });
 
-  // Admin: Create Technician or Manager
-  app.post(["/api/admin/create-user", "/api/auth/admin/create-user"], authenticate, isAdmin, async (req, res, next) => {
-    const { email, name, role, department, password } = req.body;
-    
-    if (!["technician", "manager"].includes(role)) {
-      return res.status(400).json({ error: "Invalid role for manager creation" });
-    }
-
+  app.post(["/api/admin/create-user", "/api/auth/admin/create-user", "/api/auth/invitations"], authenticate, isAdmin, async (req, res, next) => {
     try {
-      const normalizedEmail = normalizeEmail(email || "");
-      if (!name || !normalizedEmail || !department) {
-        return res.status(400).json({ error: "Name, email, and department are required." });
-      }
-      if (!isValidPassword(password)) {
-        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.` });
+      const parsed = inviteUserSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: formatValidationError(parsed.error) });
       }
 
+      const { email, name, role, department } = parsed.data;
+      if (!privilegedInviteRoles.has(role)) {
+        return res.status(400).json({ error: "Invalid role for invitation." });
+      }
+
+      const normalizedEmail = normalizeEmail(email);
       const existingProfile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
-      if (existingProfile) {
+      if (existingProfile && existingProfile.status === "active") {
         return res.status(400).json({ error: "A user with this email already exists." });
       }
 
-      const profile = await prisma.profile.create({
-        data: {
-          name,
-          email: normalizedEmail,
-          role,
-          department,
-          passwordHash: await hashPassword(password),
-        },
+      const token = randomBytes(32).toString("hex");
+      const expiresAt = new Date(Date.now() + INVITE_TOKEN_TTL_MS);
+      const profile = await prisma.$transaction(async (tx) => {
+        const pendingProfile = existingProfile
+          ? await tx.profile.update({
+              where: { id: existingProfile.id },
+              data: {
+                name,
+                email: normalizedEmail,
+                role,
+                status: "pending",
+                department,
+                passwordHash: null,
+              },
+            })
+          : await tx.profile.create({
+              data: {
+                name,
+                email: normalizedEmail,
+                role,
+                status: "pending",
+                department,
+                passwordHash: null,
+              },
+            });
+
+        await tx.inviteToken.deleteMany({
+          where: { userId: pendingProfile.id },
+        });
+
+        await tx.inviteToken.create({
+          data: {
+            token,
+            userId: pendingProfile.id,
+            expiresAt,
+          },
+        });
+
+        return pendingProfile;
+      });
+
+      const inviteUrl = buildInviteUrl(token);
+      const mailResult = await sendInviteEmail({
+        email: normalizedEmail,
+        name,
+        role,
+        inviteUrl,
       });
 
       await writeAuditLog((req as any).user, "user.invited", {
@@ -415,17 +681,73 @@ async function startServer() {
         name,
         role,
         department,
+        inviteUrl,
       });
 
       res.json({
-        message: "User created successfully.",
+        message: mailResult.delivered ? "Invitation sent successfully." : "Invitation created. SMTP is not configured, so the invite link was returned in the response.",
+        inviteUrl,
         user: {
           id: profile.id,
           name: profile.name,
           email: profile.email,
           role: profile.role,
+          status: profile.status,
           department: profile.department,
           createdAt: profile.createdAt,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/api/auth/setup-password", async (req, res, next) => {
+    try {
+      const parsed = setupPasswordSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: formatValidationError(parsed.error) });
+      }
+
+      const { token, password } = parsed.data;
+      const inviteToken = await prisma.inviteToken.findUnique({
+        where: { token },
+        include: { user: true },
+      });
+
+      if (!inviteToken) {
+        return res.status(404).json({ error: "Invite token is invalid." });
+      }
+
+      if (inviteToken.expiresAt.getTime() < Date.now()) {
+        await prisma.inviteToken.delete({ where: { token } });
+        return res.status(400).json({ error: "Invite token has expired." });
+      }
+
+      const passwordHash = await hashPassword(password);
+      const updatedUser = await prisma.$transaction(async (tx) => {
+        const user = await tx.profile.update({
+          where: { id: inviteToken.userId },
+          data: {
+            passwordHash,
+            status: "active",
+          },
+        });
+
+        await tx.inviteToken.delete({
+          where: { token },
+        });
+
+        return user;
+      });
+
+      res.json({
+        message: "Password set successfully. You can now sign in.",
+        user: {
+          id: updatedUser.id,
+          email: updatedUser.email,
+          role: updatedUser.role,
+          status: updatedUser.status,
         },
       });
     } catch (err) {
@@ -440,6 +762,38 @@ async function startServer() {
 
   app.get("/api/auth/me", authenticate, (req: any, res) => {
     res.json(req.user);
+  });
+
+  app.get("/api/admin/allowed-emails", authenticate, isAdmin, async (req, res, next) => {
+    try {
+      const allowedEmails = await prisma.allowedEmail.findMany({
+        orderBy: { createdAt: "desc" },
+      });
+      res.json(allowedEmails);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/api/admin/allowed-emails", authenticate, isAdmin, async (req, res, next) => {
+    try {
+      const parsed = allowedEmailSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: formatValidationError(parsed.error) });
+      }
+
+      const email = normalizeEmail(parsed.data.email);
+      const allowedEmail = await prisma.allowedEmail.upsert({
+        where: { email },
+        update: { isUsed: false },
+        create: { email },
+      });
+
+      await writeAuditLog((req as any).user, "allowed_email.upserted", { email });
+      res.json(allowedEmail);
+    } catch (err) {
+      next(err);
+    }
   });
 
   // Tickets
@@ -459,7 +813,11 @@ async function startServer() {
           technician: { select: { name: true } },
           asset: true,
           attachments: true,
-          feedback: true
+          feedback: true,
+          approvalRequests: {
+            where: { status: "pending" },
+            select: { id: true, type: true, status: true, createdAt: true },
+          },
         },
         orderBy: { createdAt: "desc" },
       });
@@ -484,7 +842,11 @@ async function startServer() {
           technician: { select: { name: true } },
           asset: true,
           attachments: true,
-          feedback: true
+          feedback: true,
+          approvalRequests: {
+            where: { status: "pending" },
+            select: { id: true, type: true, status: true, createdAt: true },
+          },
         },
         orderBy: { createdAt: "desc" },
       });
@@ -504,6 +866,13 @@ async function startServer() {
           asset: true,
           attachments: true,
           feedback: true,
+          approvalRequests: {
+            orderBy: { createdAt: "desc" },
+            include: {
+              requestedBy: { select: { id: true, name: true } },
+              reviewedBy: { select: { id: true, name: true } },
+            },
+          },
           assetUsages: {
             include: { asset: true, user: { select: { name: true } } },
             orderBy: { createdAt: "desc" }
@@ -537,21 +906,26 @@ async function startServer() {
 
   app.post("/api/tickets", authenticate, async (req: any, res, next) => {
     try {
-      const { title, description, category, priority, assetId, attachments } = req.body;
-      
-      // SLA Logic: Set due date based on priority
-      const dueDate = new Date();
-      if (priority === "critical") dueDate.setHours(dueDate.getHours() + 4);
-      else if (priority === "high") dueDate.setDate(dueDate.getDate() + 1);
-      else if (priority === "medium") dueDate.setDate(dueDate.getDate() + 3);
-      else dueDate.setDate(dueDate.getDate() + 7);
+      const { title, description, category, priority, assetId, attachments, templateKey } = req.body;
+      const template = templateKey ? TICKET_TEMPLATES[templateKey] : null;
+      const resolvedCategory = category || template?.category || "Other";
+      const resolvedPriority = priority || template?.priority || "medium";
+      const resolvedTitle = title || template?.title;
+      const resolvedDescription = description || template?.description;
+
+      if (!resolvedTitle || !resolvedDescription) {
+        return res.status(400).json({ error: "Title and description are required." });
+      }
+
+      const dueDate = getSLADueDate(resolvedPriority);
 
       const ticket = await prisma.ticket.create({
         data: { 
-          title, 
-          description, 
-          category, 
-          priority, 
+          title: resolvedTitle, 
+          description: resolvedDescription, 
+          category: resolvedCategory, 
+          priority: resolvedPriority, 
+          templateKey: templateKey || null,
           userId: req.user.id,
           assetId: assetId || null,
           dueDate,
@@ -563,12 +937,19 @@ async function startServer() {
       });
 
       // Log History
-      await logTicketHistory(ticket.id, req.user.id, "Created", `Ticket created with priority: ${priority}`);
+      await logTicketHistory(ticket.id, req.user.id, "Created", `Ticket created with priority: ${resolvedPriority}`);
+
+      if (assetId) {
+        await logAssetHistory(assetId, "ticket-linked", `Linked to ticket "${resolvedTitle}"`, {
+          userId: req.user.id,
+          ticketId: ticket.id,
+        });
+      }
 
       // Notify Managers
       const managers = await prisma.profile.findMany({ where: { role: { in: ["manager", "admin"] } } });
       for (const manager of managers) {
-        await createNotification(manager.id, "New Ticket", `${req.user.name} created a new ticket: ${title}`, `/tickets/${ticket.id}`);
+        await createNotification(manager.id, "New Ticket", `${req.user.name} created a new ticket: ${resolvedTitle}`, `/tickets/${ticket.id}`);
       }
 
       res.json(ticket);
@@ -596,32 +977,77 @@ async function startServer() {
         }
       }
 
+      const normalizedStatus = normalizeStatus(status);
+
       // Role-based status transition checks
-      if (status && status !== oldTicket.status) {
-        if (req.user.role === "technician" && !["in-progress", "resolved"].includes(status)) {
+      if (normalizedStatus && normalizedStatus !== oldTicket.status) {
+        if (req.user.role === "technician" && !["in-progress", "resolved"].includes(normalizedStatus)) {
           return res.status(403).json({ error: "Technicians can only set status to in-progress or resolved" });
         }
-        if (isManagerRole(req.user.role) && status !== "resolved") {
-          return res.status(403).json({ error: "Managers can only approve (resolve) tickets" });
+        if (req.user.role === "staff" && !["open", "closed"].includes(normalizedStatus)) {
+          return res.status(403).json({ error: "Requesters can only reopen or close tickets from their view." });
         }
-        if (isManagerRole(req.user.role) && !["closed", "open"].includes(status)) {
-          // Managers can close or reopen
+        if (normalizedStatus === "closed" && shouldRequireClosureApproval(oldTicket) && !isManagerRole(req.user.role)) {
+          const approvedClosureRequest = await prisma.approvalRequest.findFirst({
+            where: {
+              ticketId: oldTicket.id,
+              type: "high-priority-ticket-close",
+              status: "approved",
+            },
+          });
+          if (!approvedClosureRequest) {
+            return res.status(400).json({ error: "A manager must approve closure of high-priority tickets." });
+          }
         }
+      }
+
+      const updateData: Record<string, unknown> = {
+        status: normalizedStatus || undefined,
+        assignedTo: assignedTo === undefined ? undefined : (assignedTo || null),
+        priority: priority || undefined,
+      };
+
+      if (normalizedStatus === "resolved") {
+        updateData.resolvedAt = new Date();
+        updateData.closedAt = null;
+      }
+
+      if (normalizedStatus === "closed") {
+        updateData.closedAt = new Date();
+        if (!oldTicket.resolvedAt) {
+          updateData.resolvedAt = new Date();
+        }
+      }
+
+      if (normalizedStatus === "open" || normalizedStatus === "in-progress") {
+        updateData.closedAt = null;
+        if (normalizedStatus === "open") {
+          updateData.resolvedAt = null;
+        }
+      }
+
+      if (normalizedStatus && ["resolved", "closed"].includes(normalizedStatus)) {
+        updateData.slaPaused = false;
+        updateData.slaPausedAt = null;
+        updateData.slaPausedRemainingMinutes = null;
+        updateData.blockingReason = null;
+        updateData.blockedAt = null;
       }
 
       const ticket = await prisma.ticket.update({
         where: { id: req.params.id },
-        data: { 
-          status: status || undefined, 
-          assignedTo: assignedTo === undefined ? undefined : (assignedTo || null), 
-          priority: priority || undefined 
-        },
+        data: updateData,
       });
 
       // Notify User on Status Change
-      if (status && status !== oldTicket?.status) {
-        await createNotification(ticket.userId, "Ticket Updated", `Your ticket "${ticket.title}" is now ${status}`, `/tickets/${ticket.id}`);
-        await logTicketHistory(ticket.id, req.user.id, "Status Changed", `From ${oldTicket?.status} to ${status}`);
+      if (normalizedStatus && normalizedStatus !== oldTicket?.status) {
+        await createNotification(ticket.userId, "Ticket Updated", `Your ticket "${ticket.title}" is now ${normalizedStatus}`, `/tickets/${ticket.id}`);
+        await logTicketHistory(ticket.id, req.user.id, "Status Changed", `From ${oldTicket?.status} to ${normalizedStatus}`);
+        await writeAuditLog(req.user, "ticket.status_changed", {
+          ticketId: ticket.id,
+          from: oldTicket?.status,
+          to: normalizedStatus,
+        });
       }
 
       if (priority && priority !== oldTicket?.priority) {
@@ -638,6 +1064,31 @@ async function startServer() {
         await logTicketHistory(ticket.id, req.user.id, "Assigned To", `Assigned to ${tech?.name || "Unassigned"}`);
       }
 
+      if (normalizedStatus === "resolved" && shouldRequireClosureApproval(ticket)) {
+        const approvalRequest = await ensureApprovalRequest({
+          type: "high-priority-ticket-close",
+          requestedById: req.user.id,
+          reason: `Closure approval requested for ${ticket.priority} ticket "${ticket.title}".`,
+          ticketId: ticket.id,
+        });
+        const managers = await prisma.profile.findMany({
+          where: { role: { in: ["manager", "admin"] } },
+          select: { id: true },
+        });
+        for (const manager of managers) {
+          await createNotification(
+            manager.id,
+            "Closure Approval Needed",
+            `Ticket "${ticket.title}" requires approval before closure.`,
+            `/tickets/${ticket.id}`,
+          );
+        }
+        await writeAuditLog(req.user, "ticket.closure_approval_requested", {
+          ticketId: ticket.id,
+          approvalRequestId: approvalRequest.id,
+        });
+      }
+
       res.json(ticket);
     } catch (err) {
       next(err);
@@ -650,10 +1101,6 @@ async function startServer() {
       const { assignedTo } = req.body;
       const exists = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Ticket not found" });
-
-      if (!exists.isApproved) {
-        return res.status(400).json({ error: "Ticket must be approved before assignment" });
-      }
 
       // If assigning to someone, verify they are a technician
       if (assignedTo) {
@@ -687,6 +1134,10 @@ async function startServer() {
         techName = tech?.name || assignedTo;
       }
       await logTicketHistory(ticket.id, req.user.id, "Assigned To", `Assigned to ${techName}`);
+      await writeAuditLog(req.user, "ticket.assigned", {
+        ticketId: ticket.id,
+        assignedTo: assignedTo || null,
+      });
 
       res.json(ticket);
     } catch (err) {
@@ -726,11 +1177,24 @@ async function startServer() {
         return res.status(400).json({ error: "Only resolved tickets can be reviewed" });
       }
 
+      const reviewUpdateData: any = approved
+        ? { status: "resolved", isApproved: true, closedAt: null }
+        : {
+            status: "open",
+            isApproved: false,
+            isDelayed: false,
+            delayReason: null,
+            slaPaused: false,
+            slaPausedAt: null,
+            slaPausedRemainingMinutes: null,
+            blockingReason: null,
+            blockedAt: null,
+            slaStatus: "on-track",
+          };
+
       const updatedTicket = await prisma.ticket.update({
         where: { id: req.params.id },
-        data: approved
-          ? { status: "closed", isApproved: true }
-          : { status: "open", isApproved: false, isDelayed: false, delayReason: null },
+        data: reviewUpdateData,
       });
 
       if (approved) {
@@ -787,7 +1251,19 @@ async function startServer() {
   const seedAssetTypes = async () => {
     try {
       console.log("Checking database connection and seeding asset types...");
-      const count = await prisma.assetType.count();
+      let count: number;
+
+      try {
+        count = await prisma.assetType.count();
+      } catch (err) {
+        if (!isMissingTableError(err)) {
+          throw err;
+        }
+
+        await ensureDatabaseSchema();
+        count = await prisma.assetType.count();
+      }
+
       if (count === 0) {
         const defaults = ['Laptop', 'Desktop', 'Printer', 'Server', 'Network Device', 'Other'];
         for (const name of defaults) {
@@ -859,6 +1335,12 @@ async function startServer() {
           maintenances: { where: maintenanceWhere, orderBy: { startTime: "asc" } },
           assetType: true,
           catalog: true,
+          assignedUser: { select: { id: true, name: true, department: true } },
+          history: {
+            orderBy: { createdAt: "desc" },
+            take: 10,
+            include: { user: { select: { name: true } } },
+          },
         },
         orderBy: [{ name: "asc" }, { createdAt: "desc" }],
       });
@@ -914,7 +1396,7 @@ async function startServer() {
 
   app.post("/api/assets", authenticate, isStaff, async (req, res, next) => {
     try {
-      const { name, brand, type, typeId, serialNo, quantity, status, minStockLevel, isConsumable } = req.body;
+      const { name, brand, type, typeId, serialNo, quantity, status, minStockLevel, isConsumable, assignedUserId, assignedDepartment } = req.body;
       const normalizedQuantity = Math.max(1, parseInt(quantity?.toString() || "1"));
       const normalizedIsConsumable = Boolean(isConsumable);
       const normalizedMinStockLevel = Math.max(0, parseInt(minStockLevel?.toString() || "0"));
@@ -952,8 +1434,13 @@ async function startServer() {
             minStockLevel: normalizedMinStockLevel,
             isConsumable: true,
             status: status || "active",
+            assignedUserId: assignedUserId || null,
+            assignedDepartment: assignedDepartment || null,
           },
           include: { assetType: true, catalog: true },
+        });
+        await logAssetHistory(asset.id, "created", `Asset ${asset.name} registered in inventory`, {
+          userId: (req as any).user.id,
         });
         return res.json(asset);
       }
@@ -972,8 +1459,18 @@ async function startServer() {
               minStockLevel: normalizedMinStockLevel,
               isConsumable: false,
               status: status || "active",
+              assignedUserId: assignedUserId || null,
+              assignedDepartment: assignedDepartment || null,
             },
             include: { assetType: true, catalog: true },
+          }),
+        ),
+      );
+
+      await Promise.all(
+        createdAssets.map((asset) =>
+          logAssetHistory(asset.id, "created", `Asset ${asset.name} registered in inventory`, {
+            userId: (req as any).user.id,
           }),
         ),
       );
@@ -1029,6 +1526,10 @@ async function startServer() {
 
       // Log History
       await logTicketHistory(ticketId, req.user.id, "Asset Used", `Used ${quantity}x ${asset.name}`);
+      await logAssetHistory(assetId, "used-on-ticket", `Used ${quantity}x on ticket "${ticket.title}"`, {
+        userId: req.user.id,
+        ticketId,
+      });
 
       res.json(usage);
     } catch (err) {
@@ -1090,6 +1591,10 @@ async function startServer() {
           status: "scheduled"
         }
       });
+      await logAssetHistory(req.params.id, "maintenance-scheduled", maintenance.description || maintenance.title, {
+        userId: (req as any).user.id,
+        maintenanceId: maintenance.id,
+      });
       res.json(maintenance);
     } catch (err) {
       next(err);
@@ -1123,6 +1628,15 @@ async function startServer() {
             data: { status: "active" }
           });
         }
+        await logAssetHistory(
+          maintenance.assetId,
+          "maintenance-status-updated",
+          `Maintenance "${maintenance.title}" marked ${status}`,
+          {
+            userId: (req as any).user.id,
+            maintenanceId: maintenance.id,
+          },
+        );
       }
 
       res.json(maintenance);
@@ -1398,7 +1912,7 @@ async function startServer() {
   // Update Asset (with restock notification)
   app.put("/api/assets/:id", authenticate, isStaff, async (req, res, next) => {
     try {
-      const { name, brand, type, typeId, serialNo, quantity, status, minStockLevel, isConsumable } = req.body;
+      const { name, brand, type, typeId, serialNo, quantity, status, minStockLevel, isConsumable, assignedUserId, assignedDepartment } = req.body;
       const assetId = req.params.id;
 
       const oldAsset = await prisma.asset.findUnique({ where: { id: assetId } });
@@ -1438,6 +1952,8 @@ async function startServer() {
           minStockLevel: normalizedMinStockLevel,
           isConsumable: normalizedIsConsumable,
           status,
+          assignedUserId: assignedUserId || null,
+          assignedDepartment: assignedDepartment || null,
         },
         include: { assetType: true, catalog: true }
       });
@@ -1465,6 +1981,30 @@ async function startServer() {
           });
         }
       }
+
+      if (status && status !== oldAsset.status) {
+        await logAssetHistory(assetId, "status-updated", `Status changed from ${oldAsset.status} to ${status}`, {
+          userId: (req as any).user.id,
+        });
+      }
+
+      if (assignedUserId !== oldAsset.assignedUserId || assignedDepartment !== oldAsset.assignedDepartment) {
+        await logAssetHistory(
+          assetId,
+          "assignment-updated",
+          `Assignment updated${assignedDepartment ? ` for ${assignedDepartment}` : ""}`,
+          { userId: (req as any).user.id },
+        );
+      }
+
+      await writeAuditLog((req as any).user, "asset.updated", {
+        assetId,
+        changes: {
+          status,
+          assignedUserId: assignedUserId || null,
+          assignedDepartment: assignedDepartment || null,
+        },
+      });
 
       res.json(updatedAsset);
     } catch (err) {
@@ -1499,6 +2039,9 @@ async function startServer() {
           assetName: asset.name,
           previousQuantity: asset.quantity,
           newQuantity: updatedAsset.quantity,
+        });
+        await logAssetHistory(assetId, "quantity-decremented", "One unit removed from stock", {
+          userId: (req as any).user.id,
         });
 
         return res.json({
@@ -1536,16 +2079,142 @@ async function startServer() {
     }
   });
 
-  app.put("/api/tickets/:id/delay", authenticate, isStaff, async (req, res, next) => {
+  app.put(["/api/tickets/:id/sla-pause", "/api/tickets/:id/delay"], authenticate, isTechnician, async (req: any, res, next) => {
     try {
-      const { delayReason } = req.body;
+      const blockingReason = String(req.body?.blockingReason || req.body?.delayReason || "").trim();
+      if (!blockingReason) {
+        return res.status(400).json({ error: "A blocking reason is required to pause the SLA." });
+      }
+
       const exists = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Ticket not found" });
+      if (req.user.role === "technician" && exists.assignedTo !== req.user.id) {
+        return res.status(403).json({ error: "Technicians can only pause SLA for assigned tickets" });
+      }
+      if (["resolved", "closed"].includes(exists.status)) {
+        return res.status(400).json({ error: "Resolved or closed tickets cannot be paused" });
+      }
+      const existingTicket: any = exists;
+
+      if (existingTicket.slaPaused) {
+        return res.status(400).json({ error: "SLA is already paused for this ticket" });
+      }
+
+      const now = new Date();
+      const dueDate = exists.dueDate ? new Date(exists.dueDate) : getSLADueDate(exists.priority, now);
+      const remainingMinutes = Math.max(0, Math.ceil((dueDate.getTime() - now.getTime()) / (1000 * 60)));
+      const pauseUpdateData: any = {
+        dueDate,
+        slaPaused: true,
+        slaPausedAt: now,
+        slaPausedRemainingMinutes: remainingMinutes,
+        blockingReason,
+        blockedAt: now,
+        slaStatus: "paused",
+      };
 
       const ticket = await prisma.ticket.update({
         where: { id: req.params.id },
-        data: { isDelayed: true, delayReason }
+        data: pauseUpdateData
       });
+
+      const managers = await prisma.profile.findMany({
+        where: { role: { in: ["manager", "admin"] } },
+        select: { id: true },
+      });
+
+      for (const manager of managers) {
+        if (manager.id !== req.user.id) {
+          await createNotification(
+            manager.id,
+            "SLA Paused",
+            `${req.user.name} paused SLA for ticket "${ticket.title}" because: ${blockingReason}`,
+            `/tickets/${ticket.id}`,
+          );
+        }
+      }
+
+      await logTicketHistory(ticket.id, req.user.id, "SLA Paused", `Blocked because: ${blockingReason}`);
+      await writeAuditLog(req.user, "ticket.sla_paused", {
+        ticketId: ticket.id,
+        blockingReason,
+        remainingMinutes,
+      });
+
+      res.json(ticket);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/api/assets/:id/history", authenticate, async (req, res, next) => {
+    try {
+      const history = await prisma.assetHistory.findMany({
+        where: { assetId: req.params.id },
+        orderBy: { createdAt: "desc" },
+        include: { user: { select: { id: true, name: true } } },
+      });
+      res.json(history);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.put("/api/tickets/:id/sla-resume", authenticate, isTechnician, async (req: any, res, next) => {
+    try {
+      const exists = await prisma.ticket.findUnique({ where: { id: req.params.id } });
+      if (!exists) return res.status(404).json({ error: "Ticket not found" });
+      if (req.user.role === "technician" && exists.assignedTo !== req.user.id) {
+        return res.status(403).json({ error: "Technicians can only resume SLA for assigned tickets" });
+      }
+      const existingTicket: any = exists;
+
+      if (!existingTicket.slaPaused) {
+        return res.status(400).json({ error: "SLA is not paused for this ticket" });
+      }
+
+      const now = new Date();
+      const remainingMinutes = Math.max(0, existingTicket.slaPausedRemainingMinutes ?? 0);
+      const resumedDueDate = new Date(now.getTime() + remainingMinutes * 60 * 1000);
+      const nextSlaStatus = remainingMinutes <= 120 ? "at-risk" : "on-track";
+      const resumeUpdateData: any = {
+        dueDate: resumedDueDate,
+        slaPaused: false,
+        slaPausedAt: null,
+        slaPausedRemainingMinutes: null,
+        blockingReason: null,
+        blockedAt: null,
+        slaStatus: nextSlaStatus,
+      };
+
+      const ticket = await prisma.ticket.update({
+        where: { id: req.params.id },
+        data: resumeUpdateData
+      });
+
+      const managers = await prisma.profile.findMany({
+        where: { role: { in: ["manager", "admin"] } },
+        select: { id: true },
+      });
+
+      for (const manager of managers) {
+        if (manager.id !== req.user.id) {
+          await createNotification(
+            manager.id,
+            "SLA Resumed",
+            `${req.user.name} resumed SLA for ticket "${ticket.title}".`,
+            `/tickets/${ticket.id}`,
+          );
+        }
+      }
+
+      await logTicketHistory(ticket.id, req.user.id, "SLA Resumed", `Remaining time restored: ${remainingMinutes} minute(s)`);
+      await writeAuditLog(req.user, "ticket.sla_resumed", {
+        ticketId: ticket.id,
+        remainingMinutes,
+        resumedDueDate,
+      });
+
       res.json(ticket);
     } catch (err) {
       next(err);
@@ -1713,11 +2382,175 @@ async function startServer() {
     }
   });
 
+  app.get("/api/maintenance/:id/parts", authenticate, async (req, res, next) => {
+    try {
+      const parts = await prisma.maintenancePartUsage.findMany({
+        where: { maintenanceId: req.params.id },
+        include: { asset: true },
+        orderBy: { createdAt: "desc" },
+      });
+      res.json(parts);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/api/maintenance/:id/parts", authenticate, isStaff, async (req: any, res, next) => {
+    try {
+      const { assetId, quantity, notes } = req.body;
+      const maintenance = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
+      if (!maintenance) return res.status(404).json({ error: "Maintenance not found" });
+
+      const asset = await prisma.asset.findUnique({ where: { id: assetId } });
+      if (!asset) return res.status(404).json({ error: "Asset not found" });
+
+      const normalizedQuantity = Math.max(1, parseInt(quantity?.toString() || "1"));
+      if (asset.isConsumable && asset.quantity < normalizedQuantity) {
+        return res.status(400).json({ error: "Insufficient stock for this part" });
+      }
+
+      const [partUsage] = await prisma.$transaction([
+        prisma.maintenancePartUsage.create({
+          data: {
+            maintenanceId: req.params.id,
+            assetId,
+            quantity: normalizedQuantity,
+            notes: notes || null,
+          },
+          include: { asset: true },
+        }),
+        prisma.asset.update({
+          where: { id: assetId },
+          data: asset.isConsumable
+            ? { quantity: { decrement: normalizedQuantity } }
+            : { status: "maintenance" },
+        }),
+      ]);
+
+      await logAssetHistory(assetId, "used-in-maintenance", `Used ${normalizedQuantity}x for maintenance "${maintenance.title}"`, {
+        userId: req.user.id,
+        maintenanceId: maintenance.id,
+      });
+
+      res.json(partUsage);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/api/approvals", authenticate, isManager, async (req, res, next) => {
+    try {
+      const approvals = await prisma.approvalRequest.findMany({
+        orderBy: { createdAt: "desc" },
+        include: {
+          requestedBy: { select: { id: true, name: true } },
+          reviewedBy: { select: { id: true, name: true } },
+          ticket: { select: { id: true, title: true, priority: true, status: true } },
+          asset: { select: { id: true, name: true, status: true } },
+          maintenance: { select: { id: true, title: true, status: true } },
+        },
+      });
+      res.json(approvals);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/api/approvals", authenticate, isStaff, async (req: any, res, next) => {
+    try {
+      const approval = await ensureApprovalRequest({
+        type: req.body.type,
+        requestedById: req.user.id,
+        reason: req.body.reason,
+        ticketId: req.body.ticketId,
+        assetId: req.body.assetId,
+        maintenanceId: req.body.maintenanceId,
+      });
+
+      const managers = await prisma.profile.findMany({
+        where: { role: { in: ["manager", "admin"] } },
+        select: { id: true },
+      });
+      for (const manager of managers) {
+        await createNotification(manager.id, "Approval Requested", `A new ${approval.type} approval request is waiting for review.`, approval.ticketId ? `/tickets/${approval.ticketId}` : "/assets");
+      }
+
+      res.json(approval);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.put("/api/approvals/:id/respond", authenticate, isManager, async (req: any, res, next) => {
+    try {
+      const { status } = req.body;
+      if (!["approved", "rejected"].includes(status)) {
+        return res.status(400).json({ error: "Status must be approved or rejected" });
+      }
+
+      const approval = await prisma.approvalRequest.update({
+        where: { id: req.params.id },
+        data: {
+          status,
+          reviewedById: req.user.id,
+          reviewedAt: new Date(),
+        },
+        include: {
+          requestedBy: { select: { id: true, name: true } },
+          ticket: true,
+          asset: true,
+          maintenance: true,
+        },
+      });
+
+      if (approval.requestedById) {
+        await createNotification(
+          approval.requestedById,
+          `Approval ${status}`,
+          `Your ${approval.type} request was ${status}.`,
+          approval.ticketId ? `/tickets/${approval.ticketId}` : "/assets",
+        );
+      }
+
+      await writeAuditLog(req.user, "approval.responded", {
+        approvalRequestId: approval.id,
+        status,
+      });
+
+      res.json(approval);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/api/audit-logs", authenticate, isManager, async (req, res, next) => {
+    try {
+      const logPath = path.join(process.cwd(), "logs", "audit.log");
+      const contents = await readFile(logPath, "utf8").catch(() => "");
+      const entries = contents
+        .split("\n")
+        .filter(Boolean)
+        .slice(-200)
+        .reverse()
+        .map((line) => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+      res.json(entries);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Users Management (Admin Only)
   app.get("/api/users", authenticate, isAdmin, async (req, res, next) => {
     try {
       const users = await prisma.profile.findMany({
-        select: { id: true, name: true, email: true, role: true, department: true },
+        select: { id: true, name: true, email: true, role: true, status: true, department: true },
       });
       res.json(users);
     } catch (err) {
@@ -1747,6 +2580,7 @@ async function startServer() {
           name,
           email: normalizedEmail,
           role: allowedRoles.has(role) ? role : "staff",
+          status: "active",
           department,
           passwordHash: await hashPassword(password),
         },
@@ -1906,7 +2740,10 @@ async function startServer() {
       }
 
       const comments = await prisma.comment.findMany({
-        where: { ticketId: req.params.id },
+        where: {
+          ticketId: req.params.id,
+          ...(isManagerRole(req.user.role) || req.user.role === "technician" ? {} : { isInternal: false }),
+        },
         include: { user: { select: { name: true } }, attachments: true },
         orderBy: { createdAt: "asc" },
       });
@@ -1946,7 +2783,7 @@ async function startServer() {
 
   app.post("/api/tickets/:id/comments", authenticate, async (req: any, res, next) => {
     try {
-      const { message, attachments } = req.body;
+      const { message, attachments, isInternal } = req.body;
 
       const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
@@ -1962,16 +2799,27 @@ async function startServer() {
         return res.status(403).json({ error: "Forbidden" });
       }
 
+      if (isInternal && !isTechnicianRole(req.user.role)) {
+        return res.status(403).json({ error: "Only technicians and managers can create internal notes" });
+      }
+
       const comment = await prisma.comment.create({
         data: { 
           message, 
           ticketId: req.params.id, 
           userId: req.user.id,
+          isInternal: Boolean(isInternal),
           attachments: attachments ? {
             create: attachments.map((a: any) => ({ name: a.name, url: a.url, type: a.type }))
           } : undefined
         },
       });
+      await logTicketHistory(
+        req.params.id,
+        req.user.id,
+        Boolean(isInternal) ? "Internal Note Added" : "Comment Added",
+        message?.slice(0, 120),
+      );
       res.json(comment);
     } catch (err) {
       next(err);
@@ -1990,7 +2838,10 @@ async function startServer() {
 
       const total = await prisma.ticket.count({ where });
       const open = await prisma.ticket.count({ where: { ...where, status: "open" } });
+      const completedStatuses = ["resolved", "closed"];
       const resolved = await prisma.ticket.count({ where: { ...where, status: "resolved" } });
+      const closed = await prisma.ticket.count({ where: { ...where, status: "closed" } });
+      const completed = resolved + closed;
       const pending = await prisma.ticket.count({ where: { ...where, status: "in-progress" } });
       
       // Manual grouping for stats
@@ -2034,6 +2885,35 @@ async function startServer() {
           ...(req.user.role === "technician" ? { technicianId: req.user.id } : {})
         } 
       });
+      const slaAtRisk = await prisma.ticket.count({ where: { ...where, slaStatus: "at-risk" } });
+      const slaBreached = await prisma.ticket.count({ where: { ...where, slaStatus: "breached" } });
+      const openApprovals = isManagerRole(req.user.role)
+        ? await prisma.approvalRequest.count({ where: { status: "pending" } })
+        : 0;
+      const assetHealth = isManagerRole(req.user.role)
+        ? {
+            active: await prisma.asset.count({ where: { status: "active" } }),
+            maintenance: await prisma.asset.count({ where: { status: "maintenance" } }),
+            retired: await prisma.asset.count({ where: { status: "retired" } }),
+          }
+        : null;
+      const slaResolvedOnTimeBase = await prisma.ticket.findMany({
+        where: {
+          ...where,
+          status: { in: ["resolved", "closed"] },
+          dueDate: { not: null },
+          resolvedAt: { not: null },
+        },
+        select: { dueDate: true, resolvedAt: true },
+      });
+      const slaResolvedOnTime = slaResolvedOnTimeBase.filter((ticket) => {
+        const dueDate = ticket.dueDate ? new Date(ticket.dueDate) : null;
+        const resolvedAt = ticket.resolvedAt ? new Date(ticket.resolvedAt) : null;
+        return dueDate && resolvedAt && resolvedAt <= dueDate;
+      }).length;
+      const slaPerformance = slaResolvedOnTimeBase.length > 0
+        ? Math.round((slaResolvedOnTime / slaResolvedOnTimeBase.length) * 100)
+        : 100;
 
       // Technician specific report (for managers)
       let technicianStats = null;
@@ -2057,6 +2937,8 @@ async function startServer() {
           name: tech.name,
           total: tech.assigned.length,
           resolved: tech.assigned.filter(t => t.status === "resolved").length,
+          closed: tech.assigned.filter(t => t.status === "closed").length,
+          completed: tech.assigned.filter(t => completedStatuses.includes(t.status)).length,
           delayed: tech.assigned.filter(t => t.isDelayed).length
         }));
       }
@@ -2065,6 +2947,8 @@ async function startServer() {
         total, 
         open, 
         resolved, 
+        closed,
+        completed,
         pending, 
         byCategory, 
         byPriority, 
@@ -2072,7 +2956,12 @@ async function startServer() {
         volumeOverTime,
         delayedTickets,
         delayedMaintenance,
-        technicianStats
+        technicianStats,
+        slaAtRisk,
+        slaBreached,
+        slaPerformance,
+        openApprovals,
+        assetHealth,
       });
     } catch (err) {
       next(err);
@@ -2089,26 +2978,36 @@ async function startServer() {
     }
   });
 
-  // --- Vite Integration ---
-  // 404 handler for API routes (placed before Vite middleware)
+  app.put("/api/users/:id/status", authenticate, isAdmin, async (req, res, next) => {
+    const { status } = req.body;
+    try {
+      const exists = await prisma.profile.findUnique({ where: { id: req.params.id } });
+      if (!exists) return res.status(404).json({ error: "User not found" });
+      if (!["pending", "active", "disabled"].includes(status)) {
+        return res.status(400).json({ error: "Invalid status" });
+      }
+
+      const user = await prisma.profile.update({
+        where: { id: req.params.id },
+        data: { status },
+      });
+
+      await writeAuditLog((req as any).user, "user.status_changed", {
+        targetUserId: req.params.id,
+        status,
+      });
+
+      res.json(user);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // --- Frontend Integration ---
+  // 404 handler for API routes (placed before Next handler)
   app.all("/api/*", (req, res) => {
     res.status(404).json({ error: `API route ${req.method} ${req.url} not found` });
   });
-
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      root: frontendRoot,
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(frontendRoot, "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
 
   // Global error handler for API routes (placed after all routes)
   app.use((err: any, req: any, res: any, next: any) => {
@@ -2190,8 +3089,10 @@ async function startServer() {
       });
     }
 
-    // For non-API routes, let the default handler or Vite handle it
-    next(err);
+    res.status(status).json({
+      error: message,
+      code,
+    });
   });
 
   httpServer.listen(PORT, "0.0.0.0", () => {

@@ -10,12 +10,26 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum UserRole {
+  admin
+  manager
+  technician
+  staff
+}
+
+enum UserStatus {
+  pending
+  active
+  disabled
+}
+
 model Profile {
   id            String         @id @default(uuid())
   name          String
   email         String         @unique
   passwordHash  String?
-  role          String         @default("staff") // staff, technician, manager
+  role          UserRole       @default(staff)
+  status        UserStatus     @default(active)
   department    String?
   createdAt     DateTime       @default(now())
   tickets       Ticket[]       @relation("UserTickets")
@@ -26,6 +40,27 @@ model Profile {
   assetUsages   AssetUsage[]
   assetRequests AssetRequest[]
   maintenances  Maintenance[]  @relation("MaintenanceTechnician")
+  assetAssignments Asset[]     @relation("AssignedAssets")
+  requestedApprovals ApprovalRequest[] @relation("ApprovalRequestedBy")
+  reviewedApprovals ApprovalRequest[] @relation("ApprovalReviewedBy")
+  assetHistoryEntries AssetHistory[]
+  inviteTokens  InviteToken[]
+}
+
+model InviteToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      Profile  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model AllowedEmail {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  isUsed    Boolean  @default(false)
+  createdAt DateTime @default(now())
 }
 
 model Ticket {
@@ -35,6 +70,7 @@ model Ticket {
   status      String       @default("open") // open, in-progress, resolved, closed
   priority    String       @default("medium") // low, medium, high, critical
   category    String
+  templateKey String?
   userId      String
   user        Profile      @relation("UserTickets", fields: [userId], references: [id], onDelete: Cascade)
   assignedTo  String?
@@ -52,7 +88,17 @@ model Ticket {
   isDelayed   Boolean      @default(false)
   delayReason String?
   slaStatus   String?      @default("on-track") // on-track, at-risk, breached
+  slaPaused   Boolean      @default(false)
+  slaPausedAt DateTime?
+  slaPausedRemainingMinutes Int?
+  blockingReason String?
+  blockedAt   DateTime?
   isApproved  Boolean      @default(false)
+  escalationLevel Int      @default(0)
+  escalatedAt DateTime?
+  resolvedAt  DateTime?
+  closedAt    DateTime?
+  approvalRequests ApprovalRequest[]
 }
 
 model AssetType {
@@ -90,11 +136,17 @@ model Asset {
   minStockLevel Int           @default(0)
   isConsumable  Boolean       @default(false)
   status        String        @default("active") // active, maintenance, retired, requested
+  assignedUserId String?
+  assignedUser  Profile?      @relation("AssignedAssets", fields: [assignedUserId], references: [id], onDelete: SetNull)
+  assignedDepartment String?
   tickets       Ticket[]
   usages        AssetUsage[]
-  maintenances Maintenance[]
+  maintenances  Maintenance[]
   requests      AssetRequest[]
   createdAt     DateTime      @default(now())
+  history       AssetHistory[]
+  maintenanceParts MaintenancePartUsage[]
+  approvalRequests ApprovalRequest[]
 }
 
 model AssetRequest {
@@ -146,6 +198,7 @@ model Comment {
   ticket      Ticket       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   userId      String
   user        Profile      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  isInternal  Boolean      @default(false)
   createdAt   DateTime     @default(now())
   attachments Attachment[]
 }
@@ -184,6 +237,8 @@ model Maintenance {
   asset       Asset?   @relation(fields: [assetId], references: [id], onDelete: Cascade)
   technicianId String?
   technician   Profile? @relation("MaintenanceTechnician", fields: [technicianId], references: [id], onDelete: SetNull)
+  approvalRequests ApprovalRequest[]
+  partsUsed   MaintenancePartUsage[]
   createdAt   DateTime @default(now())
 }
 
@@ -204,4 +259,48 @@ model TicketHistory {
   action    String   // e.g., "Status changed", "Assigned to", "Created"
   details   String?  // e.g., "From Open to In-Progress"
   createdAt DateTime @default(now())
+}
+
+model ApprovalRequest {
+  id            String      @id @default(uuid())
+  type          String      // asset-retirement, major-repair, high-priority-ticket-close
+  status        String      @default("pending") // pending, approved, rejected
+  reason        String?
+  ticketId      String?
+  ticket        Ticket?     @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  assetId       String?
+  asset         Asset?      @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  maintenanceId String?
+  maintenance   Maintenance? @relation(fields: [maintenanceId], references: [id], onDelete: Cascade)
+  requestedById String
+  requestedBy   Profile     @relation("ApprovalRequestedBy", fields: [requestedById], references: [id], onDelete: Cascade)
+  reviewedById  String?
+  reviewedBy    Profile?    @relation("ApprovalReviewedBy", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt    DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+model AssetHistory {
+  id            String      @id @default(uuid())
+  assetId       String
+  asset         Asset       @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  userId        String?
+  user          Profile?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action        String
+  details       String?
+  ticketId      String?
+  maintenanceId String?
+  createdAt     DateTime    @default(now())
+}
+
+model MaintenancePartUsage {
+  id            String      @id @default(uuid())
+  maintenanceId String
+  maintenance   Maintenance @relation(fields: [maintenanceId], references: [id], onDelete: Cascade)
+  assetId       String
+  asset         Asset       @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  quantity      Int         @default(1)
+  notes         String?
+  createdAt     DateTime    @default(now())
 }

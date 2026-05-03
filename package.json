@@ -2,13 +2,16 @@
   "name": "local-ict-support-system",
   "private": true,
   "scripts": {
-    "dev": "npm run dev:backend",
+    "dev": "concurrently -k -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
     "dev:frontend": "npm --prefix frontend run dev",
     "dev:backend": "npm --prefix backend run dev",
     "build:frontend": "npm --prefix frontend run build",
-    "preview:frontend": "npm --prefix frontend run preview",
+    "start:frontend": "npm --prefix frontend run start",
     "seed:users": "npm --prefix backend run seed:users",
     "db:push": "npm --prefix backend exec prisma db push",
     "db:generate": "npm --prefix backend exec prisma generate"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
   }
 }

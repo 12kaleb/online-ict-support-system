@@ -1,2 +1,1 @@
-
-
+- [x] Install at client: cd client && npm install (ongoing spinner)

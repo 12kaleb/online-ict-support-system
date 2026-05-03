@@ -18,7 +18,9 @@ async function main() {
   await prisma.attachment.deleteMany();
   await prisma.ticket.deleteMany();
   await prisma.maintenance.deleteMany();
+  await prisma.inviteToken.deleteMany();
   await prisma.profile.deleteMany();
+  await prisma.allowedEmail.deleteMany();
   await prisma.asset.deleteMany();
   await prisma.knowledgeBase.deleteMany();
 
@@ -31,7 +33,8 @@ async function main() {
       id: "00000000-0000-0000-0000-000000000001", // Placeholder ID
       name: "Admin User",
       email: "kalebteshome94@gmail.com",
-      role: "admin"
+      role: "admin",
+      status: "active",
     }
   });
   
@@ -40,7 +43,8 @@ async function main() {
       id: "00000000-0000-0000-0000-000000000002",
       name: "Manager User",
       email: "manager@example.com",
-      role: "manager"
+      role: "manager",
+      status: "active",
     }
   });
  
@@ -49,7 +53,8 @@ async function main() {
       id: "00000000-0000-0000-0000-000000000003",
       name: "Technician User",
       email: "tech@example.com",
-      role: "technician"
+      role: "technician",
+      status: "active",
     }
   });
 

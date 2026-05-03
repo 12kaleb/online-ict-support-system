@@ -1,3 +1,5 @@
+'use client';
+
 import { Database, AlertTriangle, ExternalLink, RefreshCw } from 'lucide-react';
 import { motion } from 'motion/react';
 

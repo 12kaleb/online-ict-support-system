@@ -1,6 +1,8 @@
-import { Outlet, useNavigate, Link, useLocation } from 'react-router-dom';
+'use client';
+
+import { useNavigate, Link, useLocation } from '../lib/router';
 import { useState, useEffect, useRef } from 'react';
-import { LogOut, User as UserIcon, LayoutDashboard, Ticket, HelpCircle, UserCircle, Bell, Sun, Moon, Shield, BarChart3, Laptop, Calendar, Check, Languages, History, ChevronDown } from 'lucide-react';
+import { LogOut, User as UserIcon, LayoutDashboard, Ticket, HelpCircle, UserCircle, Bell, Sun, Moon, Shield, BarChart3, Laptop, Calendar, Check, Languages, History, ChevronDown, Users } from 'lucide-react';
 import { useThemeContext } from '../contexts/ThemeContext';
 import { format } from 'date-fns';
 import { useTranslation } from 'react-i18next';
@@ -16,10 +18,11 @@ function cn(...inputs: ClassValue[]) {
 
 import { useNotifications } from '../contexts/NotificationContext';
 
-export default function Layout({ user, onLogout }: { user: any, onLogout: () => void }) {
+export default function Layout({ user, onLogout, children }: { user: any, onLogout: () => void, children: React.ReactNode }) {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
+  const pathname = location.pathname ?? '';
   const { mode, toggleTheme } = useThemeContext();
   const { notifications, unreadCount, markAsRead, markAllAsRead } = useNotifications();
   
@@ -83,6 +86,7 @@ export default function Layout({ user, onLogout }: { user: any, onLogout: () => 
   
   if (isManagerLevel) {
     navItems.splice(2, 0, { label: t('Reports'), path: '/reports', icon: <BarChart3 size={18} /> });
+    navItems.splice(3, 0, { label: t('Technicians'), path: '/reports/technicians', icon: <Users size={18} /> });
     if (isAdminUser) {
       navItems.push({ label: t('Admin'), path: '/admin', icon: <Shield size={18} /> });
     }
@@ -113,7 +117,7 @@ export default function Layout({ user, onLogout }: { user: any, onLogout: () => 
                     to={item.path}
                     className={cn(
                       "flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition-all",
-                      location.pathname === item.path
+                      pathname === item.path || (item.path === '/reports' && pathname.startsWith('/reports'))
                         ? "bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400"
                         : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-100"
                     )}
@@ -343,7 +347,7 @@ export default function Layout({ user, onLogout }: { user: any, onLogout: () => 
       {/* Main Content */}
       <main className="flex-grow py-8">
         <div className="container mx-auto px-4 lg:px-8">
-          <Outlet />
+          {children}
         </div>
       </main>
     </div>

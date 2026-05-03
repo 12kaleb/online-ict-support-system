@@ -1,3 +1,5 @@
+'use client';
+
 import React, { createContext, useContext, useState, useEffect } from 'react';
 
 type PaletteMode = 'light' | 'dark';
@@ -16,6 +18,10 @@ export const useThemeContext = () => useContext(ThemeContext);
 
 export const ThemeContextProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [mode, setMode] = useState<PaletteMode>(() => {
+    if (typeof window === 'undefined') {
+      return 'light';
+    }
+
     const savedMode = localStorage.getItem('themeMode');
     return (savedMode as PaletteMode) || 'light';
   });
