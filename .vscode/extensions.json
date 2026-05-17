@@ -1,6 +1,8 @@
 {
     "recommendations": [
         "openai.chatgpt",
-        "anthropic.claude-code"
+        "anthropic.claude-code",
+        "warm3snow.vscode-ollama",
+        "google.geminicodeassist"
     ]
 }

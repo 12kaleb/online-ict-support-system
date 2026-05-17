@@ -20,7 +20,7 @@ import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/utils';
 import { Link } from '@/lib/router';
 
-const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
+const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'] as const;
 
 export default function Reports() {
   const { t } = useTranslation();
@@ -198,7 +198,7 @@ export default function Reports() {
                   dataKey="value"
                 >
                   {statusData.map((entry: any, index: number) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length] ?? COLORS[0]} />
                   ))}
                 </Pie>
                 <Tooltip 

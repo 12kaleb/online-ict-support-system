@@ -2,6 +2,10 @@ export function isAdmin(user: any) {
   return user?.role === 'admin';
 }
 
+export function canInviteStaff(user: any) {
+  return isAdmin(user) || (user?.role === 'manager' && Boolean(user?.canInviteStaff));
+}
+
 export function isManager(user: any) {
   return user?.role === 'manager' || isAdmin(user);
 }

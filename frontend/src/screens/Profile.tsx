@@ -1,26 +1,94 @@
 'use client';
 
-import { User, Mail, Shield, Calendar, MapPin, Phone, Edit2, ShieldAlert } from 'lucide-react';
+import { User, Mail, Shield, Calendar, Edit2, ShieldAlert, Send, Copy, CheckCircle2, Link as LinkIcon, Unlink } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useThemeContext } from '../contexts/ThemeContext';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'motion/react';
 import { cn } from '../lib/utils';
+import { toast } from 'sonner';
+
+type TelegramLink = {
+  code: string;
+  expiresAt: string;
+  command: string;
+  botUsername: string | null;
+  botLink: string | null;
+};
 
 export default function Profile() {
   const { t } = useTranslation();
   const { mode } = useThemeContext();
   const [user, setUser] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [telegramLink, setTelegramLink] = useState<TelegramLink | null>(null);
+  const [telegramLoading, setTelegramLoading] = useState(false);
 
-  useEffect(() => {
-    fetch('/api/auth/me')
+  const fetchUser = () => {
+    return fetch('/api/auth/me')
       .then(res => res.json())
       .then(data => {
         setUser(data);
         setLoading(false);
       });
+  };
+
+  useEffect(() => {
+    fetchUser();
   }, []);
+
+  const handleGenerateTelegramLink = async () => {
+    setTelegramLoading(true);
+    try {
+      const res = await fetch('/api/profile/telegram/link-code', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Failed to create Telegram link code');
+      setTelegramLink(data);
+      if (data.botLink) {
+        toast.success('Opening Telegram bot');
+        window.location.href = data.botLink;
+      } else {
+        toast.success('Telegram link code created');
+        toast.info('Add TELEGRAM_BOT_USERNAME to enable automatic bot redirects.');
+      }
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to create Telegram link code');
+    } finally {
+      setTelegramLoading(false);
+    }
+  };
+
+  const handleDisconnectTelegram = async () => {
+    setTelegramLoading(true);
+    try {
+      const res = await fetch('/api/profile/telegram', { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || 'Failed to disconnect Telegram');
+      setTelegramLink(null);
+      await fetchUser();
+      toast.success('Telegram disconnected');
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to disconnect Telegram');
+    } finally {
+      setTelegramLoading(false);
+    }
+  };
+
+  const handleCopyTelegramCommand = async () => {
+    if (!telegramLink?.command) return;
+    await navigator.clipboard.writeText(telegramLink.command);
+    toast.success('Telegram command copied');
+  };
+
+  const handleRefreshTelegramStatus = async () => {
+    setTelegramLoading(true);
+    try {
+      await fetchUser();
+      toast.success('Profile refreshed');
+    } finally {
+      setTelegramLoading(false);
+    }
+  };
 
   if (loading) return (
     <div className="flex items-center justify-center min-h-[400px]">
@@ -137,6 +205,93 @@ export default function Profile() {
                 <p className="text-sm text-indigo-700/80 dark:text-indigo-300/80 leading-relaxed">
                   {t('Ensure your password is strong and updated regularly. If you suspect any unauthorized access, contact the ICT security team immediately.')}
                 </p>
+              </div>
+            </div>
+
+            <div className="mt-6 rounded-3xl border border-sky-100 bg-sky-50/60 p-6 dark:border-sky-900/30 dark:bg-sky-900/10">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div className="flex items-start gap-4">
+                  <div className="rounded-2xl bg-sky-100 p-3 text-sky-600 dark:bg-sky-900/40 dark:text-sky-300">
+                    <Send size={24} />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black uppercase tracking-wider text-sky-950 dark:text-sky-100">{t('Telegram Notifications')}</h4>
+                    <p className="mt-1 text-sm leading-relaxed text-sky-800/80 dark:text-sky-200/80">
+                      {user?.telegramLinked
+                        ? t('Your Telegram account is connected. You will receive support notifications from the bot.')
+                        : t('Connect your Telegram account to receive support notifications from the bot. You will be redirected to Telegram to finish linking.')}
+                    </p>
+                  </div>
+                </div>
+                <span className={cn(
+                  "inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-1 text-[10px] font-black uppercase tracking-wider",
+                  user?.telegramLinked
+                    ? "border-emerald-200 bg-emerald-100 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300"
+                    : "border-slate-200 bg-white text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                )}>
+                  <CheckCircle2 size={14} />
+                  {user?.telegramLinked ? t('Connected') : t('Not Connected')}
+                </span>
+              </div>
+
+              {telegramLink && !user?.telegramLinked && (
+                <div className="mt-5 rounded-2xl border border-sky-200 bg-white p-4 dark:border-sky-900/40 dark:bg-slate-950/40">
+                  <p className="text-xs font-black uppercase tracking-wider text-slate-400">{t('Send this command to your Telegram bot')}</p>
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                    <code className="flex-1 rounded-xl bg-slate-100 px-4 py-3 text-sm font-black text-slate-800 dark:bg-slate-900 dark:text-slate-100">
+                      {telegramLink.command}
+                    </code>
+                    <button
+                      onClick={handleCopyTelegramCommand}
+                      className="btn-secondary"
+                    >
+                      <Copy size={18} />
+                      {t('Copy')}
+                    </button>
+                  </div>
+                  {telegramLink.botLink && (
+                    <a
+                      href={telegramLink.botLink}
+                      className="mt-3 inline-flex items-center gap-2 text-sm font-bold text-sky-700 hover:underline dark:text-sky-300"
+                    >
+                      <LinkIcon size={16} />
+                      {t('Open Telegram Bot')}
+                    </a>
+                  )}
+                  <p className="mt-3 text-xs font-medium text-slate-500 dark:text-slate-400">
+                    {t('The code expires in 10 minutes. After sending it, refresh this profile to confirm connection.')}
+                  </p>
+                </div>
+              )}
+
+              <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+                {user?.telegramLinked ? (
+                  <button
+                    onClick={handleDisconnectTelegram}
+                    disabled={telegramLoading}
+                    className="btn-secondary"
+                  >
+                    <Unlink size={18} />
+                    {t('Disconnect Telegram')}
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleGenerateTelegramLink}
+                    disabled={telegramLoading}
+                    className="btn-primary"
+                  >
+                    <LinkIcon size={18} />
+                    {telegramLink ? t('Generate New Code') : t('Connect Telegram')}
+                  </button>
+                )}
+                <button
+                  onClick={handleRefreshTelegramStatus}
+                  disabled={telegramLoading}
+                  className="btn-secondary"
+                >
+                  <CheckCircle2 size={18} />
+                  {t('Refresh Status')}
+                </button>
               </div>
             </div>
           </div>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Mail, Lock, User, Shield, Eye, EyeOff, Ticket, Sun, Moon, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Mail, Lock, Eye, EyeOff, Ticket, Sun, Moon, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useThemeContext } from '../contexts/ThemeContext';
 import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'motion/react';
@@ -18,11 +18,8 @@ export default function Login({ onLogin }: { onLogin: (user: any) => void }) {
   const { mode, toggleTheme } = useThemeContext();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [name, setName] = useState('');
-  const [department, setDepartment] = useState('');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const [isRegister, setIsRegister] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
@@ -33,24 +30,15 @@ export default function Login({ onLogin }: { onLogin: (user: any) => void }) {
     setMessage('');
     setIsLoading(true);
     
-    const url = isRegister ? '/api/auth/register' : '/api/auth/login';
-    const body = isRegister ? { email, password, name, department } : { email, password, rememberMe };
-
     try {
-      const res = await fetch(url, {
+      const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ email, password, rememberMe }),
       });
       const data = await handleResponse(res);
       if (res.ok) {
-        if (isRegister) {
-          setIsRegister(false);
-          setMessage(data.message || t('Registration submitted. Your account is pending admin approval before you can sign in.'));
-          setPassword('');
-        } else {
-          onLogin(data);
-        }
+        onLogin(data);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Something went wrong. Please try again.';
@@ -97,28 +85,11 @@ export default function Login({ onLogin }: { onLogin: (user: any) => void }) {
           animate={{ y: 0, opacity: 1 }}
           className="bg-white dark:bg-slate-900 rounded-3xl shadow-2xl shadow-slate-200 dark:shadow-none border border-slate-100 dark:border-slate-800 overflow-hidden"
         >
-          {/* Tabs */}
-          <div className="flex border-b border-slate-100 dark:border-slate-800">
-            <button 
-              onClick={() => setIsRegister(false)}
-              className={cn(
-                "flex-1 py-4 text-sm font-bold transition-all relative",
-                !isRegister ? "text-blue-600" : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-              )}
-            >
-              {t("Sign In")}
-              {!isRegister && <motion.div layoutId="tab-underline" className="absolute bottom-0 left-0 right-0 h-1 bg-blue-600" />}
-            </button>
-            <button 
-              onClick={() => setIsRegister(true)}
-              className={cn(
-                "flex-1 py-4 text-sm font-bold transition-all relative",
-                isRegister ? "text-blue-600" : "text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-              )}
-            >
-              {t("Register")}
-              {isRegister && <motion.div layoutId="tab-underline" className="absolute bottom-0 left-0 right-0 h-1 bg-blue-600" />}
-            </button>
+          <div className="border-b border-slate-100 px-8 py-5 dark:border-slate-800">
+            <h2 className="text-lg font-black text-slate-900 dark:text-white">{t('Sign In')}</h2>
+            <p className="mt-1 text-sm font-medium text-slate-500 dark:text-slate-400">
+              {t('New users must use the invitation link sent by an administrator to set their password.')}
+            </p>
           </div>
 
           <div className="p-8">
@@ -151,51 +122,6 @@ export default function Login({ onLogin }: { onLogin: (user: any) => void }) {
             </AnimatePresence>
 
             <form onSubmit={handleSubmit} className="space-y-4">
-              <AnimatePresence mode="popLayout">
-                {isRegister && (
-                  <motion.div 
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 20 }}
-                    className="space-y-4"
-                  >
-                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-300">
-                      {t('Staff accounts require admin approval before the first sign in.')}
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">{t("Full Name")}</label>
-                      <div className="relative">
-                        <User className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                        <input 
-                          type="text"
-                          value={name}
-                          onChange={(e) => setName(e.target.value)}
-                          required
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
-                          placeholder="kaleb teshome"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">{t("Department")}</label>
-                      <div className="relative">
-                        <Shield className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-                        <input 
-                          type="text"
-                          value={department}
-                          onChange={(e) => setDepartment(e.target.value)}
-                          required
-                          className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none"
-                          placeholder="IT, HR, Finance..."
-                        />
-                      </div>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-wider ml-1">{t("Email Address")}</label>
                 <div className="relative">
@@ -233,22 +159,20 @@ export default function Login({ onLogin }: { onLogin: (user: any) => void }) {
                 </div>
               </div>
 
-              {!isRegister && (
-                <div className="flex items-center justify-between py-1">
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input 
-                      type="checkbox"
-                      checked={rememberMe}
-                      onChange={(e) => setRememberMe(e.target.checked)}
-                      className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 transition-all"
-                    />
-                    <span className="text-sm text-slate-500 group-hover:text-slate-700 dark:group-hover:text-slate-300 transition-colors">{t('Remember me')}</span>
-                  </label>
-                  <button type="button" className="text-sm font-bold text-blue-600 hover:text-blue-700 transition-colors">
-                    {t('Forgot password?')}
-                  </button>
-                </div>
-              )}
+              <div className="flex items-center justify-between py-1">
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <input 
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={(e) => setRememberMe(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 transition-all"
+                  />
+                  <span className="text-sm text-slate-500 group-hover:text-slate-700 dark:group-hover:text-slate-300 transition-colors">{t('Remember me')}</span>
+                </label>
+                <button type="button" className="text-sm font-bold text-blue-600 hover:text-blue-700 transition-colors">
+                  {t('Forgot password?')}
+                </button>
+              </div>
 
               <button
                 type="submit"
@@ -258,7 +182,7 @@ export default function Login({ onLogin }: { onLogin: (user: any) => void }) {
                 {isLoading ? (
                   <div className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 ) : (
-                  isRegister ? t('Request Access') : t('Sign In')
+                  t('Sign In')
                 )}
               </button>
             </form>

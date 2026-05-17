@@ -70,12 +70,13 @@ export default function AppBootstrap({ children }: { children: React.ReactNode }
   }
 
   if (dbError) {
+    const retry = () => window.location.reload();
+    const errorProps = dbError.code
+      ? { error: dbError.error, code: dbError.code, onRetry: retry }
+      : { error: dbError.error, onRetry: retry };
+
     return (
-      <DatabaseError
-        error={dbError.error}
-        code={dbError.code}
-        onRetry={() => window.location.reload()}
-      />
+      <DatabaseError {...errorProps} />
     );
   }
 

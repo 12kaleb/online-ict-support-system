@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -16,16 +16,52 @@ export function GuardedRoute({
   children: (user: User) => React.ReactNode;
 }) {
   const router = useRouter();
-  const { user, loading } = useAuth();
+  const { user, loading, refreshUser } = useAuth();
+  const [verifying, setVerifying] = useState(true);
   const canAccess = user && (allow ? allow(user) : true);
 
   useEffect(() => {
-    if (!loading && user && !canAccess) {
+    let cancelled = false;
+
+    const verifyAccess = async () => {
+      if (loading) return;
+
+      if (!user) {
+        setVerifying(false);
+        return;
+      }
+
+      try {
+        const freshUser = await refreshUser();
+        if (!cancelled && freshUser && allow && !allow(freshUser)) {
+          router.replace(redirectTo);
+        }
+      } catch {
+        if (!cancelled) {
+          router.replace('/login');
+        }
+      } finally {
+        if (!cancelled) {
+          setVerifying(false);
+        }
+      }
+    };
+
+    setVerifying(true);
+    verifyAccess();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [allow, loading, redirectTo, refreshUser, router, user?.id]);
+
+  useEffect(() => {
+    if (!verifying && !loading && user && !canAccess) {
       router.replace(redirectTo);
     }
-  }, [canAccess, loading, redirectTo, router, user]);
+  }, [canAccess, loading, redirectTo, router, user, verifying]);
 
-  if (loading || !user || !canAccess) {
+  if (loading || verifying || !user || !canAccess) {
     return null;
   }
 

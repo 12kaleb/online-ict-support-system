@@ -30,6 +30,30 @@ import { safeDate } from '../utils/dateUtils';
 import { useThemeContext } from '../contexts/ThemeContext';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
+import { toast } from 'sonner';
+
+const statusRank: Record<string, number> = {
+  open: 0,
+  'in-progress': 1,
+  'pending-confirmation': 2,
+  resolved: 3,
+  closed: 4,
+};
+
+const staggerContainer = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.05,
+    },
+  },
+};
+
+const fadeUp = {
+  hidden: { opacity: 0, y: 16 },
+  show: { opacity: 1, y: 0 },
+};
 
 export default function AllTickets({ user }: { user: any }) {
   const { t } = useTranslation();
@@ -141,8 +165,12 @@ export default function AllTickets({ user }: { user: any }) {
       if (res.ok) {
         fetchTickets();
         setAssignDialogOpen(false);
+      } else {
+        const data = await res.json().catch(() => null);
+        toast.error(data?.error || 'Failed to assign technician');
       }
-    } catch (err) {
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to assign technician');
       console.error("Assign error:", err);
     }
   };
@@ -156,17 +184,28 @@ export default function AllTickets({ user }: { user: any }) {
       });
       if (res.ok) {
         fetchTickets();
+      } else {
+        const data = await res.json().catch(() => null);
+        toast.error(data?.error || 'Failed to update ticket status');
       }
-    } catch (err) {
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to update ticket status');
       console.error("Status update error:", err);
     }
     setAnchorEl(null);
+  };
+
+  const canMoveToStatus = (ticket: any, nextStatus: string) => {
+    const currentRank = statusRank[ticket.status];
+    const nextRank = statusRank[nextStatus];
+    return currentRank !== undefined && nextRank !== undefined && nextRank >= currentRank;
   };
 
   const getStatusStyles = (status: string) => {
     switch (status.toLowerCase()) {
       case 'open': return 'bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400';
       case 'in-progress': return 'bg-amber-50 text-amber-600 dark:bg-amber-900/20 dark:text-amber-400';
+      case 'pending-confirmation': return 'bg-indigo-50 text-indigo-600 dark:bg-indigo-900/20 dark:text-indigo-400';
       case 'resolved': return 'bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20 dark:text-emerald-400';
       case 'closed': return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400';
       default: return 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400';
@@ -212,10 +251,17 @@ export default function AllTickets({ user }: { user: any }) {
     total: tickets.length,
     open: tickets.filter(t => t.status === 'open').length,
     inProgress: tickets.filter(t => t.status === 'in-progress').length,
+    pendingConfirmation: tickets.filter(t => t.status === 'pending-confirmation').length,
     resolved: tickets.filter(t => t.status === 'resolved').length,
     closed: tickets.filter(t => t.status === 'closed').length,
     critical: tickets.filter(t => t.priority === 'critical').length,
   };
+  const currentTickets = filteredTickets.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage);
+  const totalPages = Math.ceil(filteredTickets.length / rowsPerPage);
+  const visiblePages = Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+    const start = Math.min(Math.max(page - 2, 0), Math.max(totalPages - 5, 0));
+    return start + i;
+  });
 
   if (loading && tickets.length === 0) {
     return (
@@ -228,60 +274,69 @@ export default function AllTickets({ user }: { user: any }) {
 
   return (
     <motion.div 
-      initial={{ opacity: 0, y: 10 }} 
-      animate={{ opacity: 1, y: 0 }} 
+      variants={staggerContainer}
+      initial="hidden"
+      animate="show"
       transition={{ duration: 0.4 }}
       className="space-y-8"
     >
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
-        <div>
-          <h1 className="text-4xl font-black text-slate-900 dark:text-white tracking-tight mb-2">{t('Support Tickets')}</h1>
-          <p className="text-slate-500 dark:text-slate-400 max-w-2xl">
+      <motion.div variants={fadeUp} className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
+        <div className="min-w-0">
+          <h1 className="page-title">{t('Support Tickets')}</h1>
+          <p className="page-subtitle">
             {t('Centralized management for all organization-wide support requests.')}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="grid grid-cols-2 gap-3 sm:flex sm:items-center">
           <button 
             onClick={exportToCSV}
-            className="flex items-center gap-2 px-5 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all shadow-sm"
+            className="btn-secondary interactive-lift w-full sm:w-auto"
           >
             <Download size={18} />
             {t('Export')}
           </button>
           <button 
             onClick={fetchTickets}
-            className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold transition-all shadow-lg shadow-blue-600/20 active:scale-95"
+            className="btn-primary interactive-lift w-full sm:w-auto"
           >
             <RefreshCw size={18} />
             {t('Refresh')}
           </button>
         </div>
-      </div>
+      </motion.div>
 
       {/* Stats Overview */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+      <motion.div variants={staggerContainer} className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-6">
         {[
           { label: t('Total Tickets'), value: stats.total, icon: Ticket, color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-900/20' },
           { label: t('Open'), value: stats.open, icon: AlertCircle, color: 'text-red-600', bg: 'bg-red-50 dark:bg-red-900/20' },
           { label: t('In Progress'), value: stats.inProgress, icon: Clock, color: 'text-amber-600', bg: 'bg-amber-50 dark:bg-amber-900/20' },
+          { label: t('Pending Confirmation'), value: stats.pendingConfirmation, icon: CheckCircle, color: 'text-indigo-600', bg: 'bg-indigo-50 dark:bg-indigo-900/20' },
           { label: t('Resolved'), value: stats.resolved, icon: CheckCircle2, color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
           { label: t('Closed'), value: stats.closed, icon: Archive, color: 'text-slate-600 dark:text-slate-300', bg: 'bg-slate-100 dark:bg-slate-800' },
           { label: t('Critical'), value: stats.critical, icon: AlertTriangle, color: 'text-red-600', bg: 'bg-red-50 dark:bg-red-900/20' },
         ].map((stat, i) => (
-          <div key={i} className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-sm flex items-center gap-4">
-            <div className={cn("w-12 h-12 rounded-xl flex items-center justify-center shrink-0", stat.bg)}>
-              <stat.icon className={stat.color} size={24} />
+          <motion.div
+            key={i}
+            variants={fadeUp}
+            whileHover={{ y: -3, scale: 1.01 }}
+            whileTap={{ scale: 0.99 }}
+            transition={{ type: 'spring', stiffness: 320, damping: 24 }}
+            className="surface-compact flex min-w-0 items-center gap-3 p-3 sm:gap-4 sm:p-5"
+          >
+            <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-xl sm:h-11 sm:w-11", stat.bg)}>
+              <stat.icon className={stat.color} size={22} />
             </div>
-            <div>
-              <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">{stat.label}</p>
-              <p className="text-2xl font-black text-slate-900 dark:text-white">{stat.value}</p>
+            <div className="min-w-0">
+              <p className="mb-1 truncate text-[10px] font-bold uppercase tracking-wider text-slate-400 sm:text-xs">{stat.label}</p>
+              <p className="text-xl font-black tabular-nums text-slate-950 dark:text-white sm:text-2xl">{stat.value}</p>
             </div>
-          </div>
+          </motion.div>
         ))}
-      </div>
+      </motion.div>
 
       {/* Filters Bar */}
-      <div className="bg-white dark:bg-slate-900 p-4 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm">
+      <motion.div variants={fadeUp} className="surface p-3 sm:p-4">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-4 items-center">
           <div className="lg:col-span-3 relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
@@ -290,7 +345,7 @@ export default function AllTickets({ user }: { user: any }) {
               placeholder={t("Search tickets...")}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-10 pr-10 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-sm"
+              className="field pl-10 pr-10"
             />
             {search && (
               <button 
@@ -305,11 +360,12 @@ export default function AllTickets({ user }: { user: any }) {
             <select 
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-sm appearance-none"
+              className="field appearance-none"
             >
               <option value="all">{t('All Status')}</option>
               <option value="open">{t('Open')}</option>
               <option value="in-progress">{t('In Progress')}</option>
+              <option value="pending-confirmation">{t('Pending Confirmation')}</option>
               <option value="resolved">{t('Resolved')}</option>
               <option value="closed">{t('Closed')}</option>
             </select>
@@ -318,7 +374,7 @@ export default function AllTickets({ user }: { user: any }) {
             <select 
               value={priorityFilter}
               onChange={(e) => setPriorityFilter(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-sm appearance-none"
+              className="field appearance-none"
             >
               <option value="all">{t('All Priority')}</option>
               <option value="low">{t('low')}</option>
@@ -331,7 +387,7 @@ export default function AllTickets({ user }: { user: any }) {
             <select 
               value={categoryFilter}
               onChange={(e) => setCategoryFilter(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-sm appearance-none"
+              className="field appearance-none"
             >
               <option value="all">{t('All Category')}</option>
               <option value="Hardware">{t('Hardware')}</option>
@@ -344,7 +400,7 @@ export default function AllTickets({ user }: { user: any }) {
             <select 
               value={techFilter}
               onChange={(e) => setTechFilter(e.target.value)}
-              className="w-full px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all outline-none text-sm appearance-none"
+              className="field appearance-none"
             >
               <option value="all">{t('All Technicians')}</option>
               <option value="unassigned">{t('Unassigned')}</option>
@@ -357,18 +413,124 @@ export default function AllTickets({ user }: { user: any }) {
             <button 
               onClick={handleClearFilters}
               disabled={search === '' && statusFilter === 'all' && priorityFilter === 'all' && categoryFilter === 'all' && techFilter === 'all'}
-              className="w-full flex items-center justify-center gap-2 py-2.5 text-sm font-bold text-slate-500 hover:text-red-600 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+              className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 py-2.5 text-sm font-bold text-slate-500 transition-colors hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30 dark:border-slate-800 lg:border-0"
             >
               <X size={16} />
               {t('Clear')}
             </button>
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Tickets Table */}
-      <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-100 dark:border-slate-800 overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
+      <motion.div variants={fadeUp} className="surface overflow-hidden">
+        <div className="block divide-y divide-slate-100 p-3 dark:divide-slate-800 md:hidden">
+          <AnimatePresence mode="popLayout">
+            {currentTickets.map((ticket) => (
+              <motion.div
+                key={ticket.id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, x: -12 }}
+                transition={{ duration: 0.2 }}
+                className="relative py-4 first:pt-1"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-900/20">
+                    <FileText size={18} />
+                  </div>
+                  <Link to={`/tickets/${ticket.id}`} className="min-w-0 flex-1">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <span className={cn("badge", getStatusStyles(ticket.status))}>{t(ticket.status)}</span>
+                      <span className={cn("text-xs font-black capitalize", getPriorityColor(ticket.priority))}>{t(ticket.priority)}</span>
+                    </div>
+                    <h3 className="line-clamp-2 text-sm font-black leading-5 text-slate-950 dark:text-white">{ticket.title}</h3>
+                    <p className="mt-1 text-[10px] font-black uppercase tracking-tight text-slate-400">#{ticket.id.slice(0, 8).toUpperCase()}</p>
+                  </Link>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setAnchorEl(anchorEl === e.currentTarget ? null : e.currentTarget);
+                      setMenuTicket(ticket);
+                    }}
+                    className="icon-btn shrink-0"
+                    aria-label={t('Actions')}
+                  >
+                    <MoreVertical size={18} />
+                  </button>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3 rounded-xl bg-slate-50 p-3 text-xs dark:bg-slate-800/50">
+                  <div className="min-w-0">
+                    <p className="font-black uppercase tracking-wider text-slate-400">{t('User')}</p>
+                    <p className="mt-1 truncate font-bold text-slate-700 dark:text-slate-200">{ticket.user?.name || 'Unknown'}</p>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-black uppercase tracking-wider text-slate-400">{t('Assigned')}</p>
+                    <p className="mt-1 truncate font-bold text-slate-700 dark:text-slate-200">{ticket.technician?.name || t('Unassigned')}</p>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-black uppercase tracking-wider text-slate-400">{t('Category')}</p>
+                    <p className="mt-1 truncate font-bold text-slate-700 dark:text-slate-200">{t(ticket.category)}</p>
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-black uppercase tracking-wider text-slate-400">{t('Created')}</p>
+                    <p className="mt-1 truncate font-bold text-slate-700 dark:text-slate-200">
+                      {safeDate(ticket.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                    </p>
+                  </div>
+                </div>
+
+                {anchorEl && menuTicket?.id === ticket.id && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={(e) => { e.stopPropagation(); setAnchorEl(null); }} />
+                    <div className="menu-surface absolute right-0 top-12 z-20 w-[min(14rem,calc(100vw-2rem))] overflow-hidden py-2">
+                      <Link
+                        to={`/tickets/${ticket.id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="flex items-center gap-3 px-4 py-2.5 text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        <ExternalLink size={16} />
+                        {t('View Details')}
+                      </Link>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleOpenAssign(ticket); }}
+                        className="flex w-full items-center gap-3 px-4 py-2.5 text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        <UserPlus size={16} />
+                        {t('Assign Technician')}
+                      </button>
+                      <div className="my-1 h-px bg-slate-100 dark:bg-slate-800" />
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleUpdateStatus(ticket.id, 'in-progress'); }}
+                        disabled={ticket.status === 'in-progress' || !canMoveToStatus(ticket, 'in-progress')}
+                        className="w-full px-4 py-2.5 text-left text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-30 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        {t('Start Work')}
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleUpdateStatus(ticket.id, 'resolved'); }}
+                        disabled={ticket.status === 'resolved' || !canMoveToStatus(ticket, 'resolved')}
+                        className="w-full px-4 py-2.5 text-left text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-30 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        {t('Mark Resolved')}
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleUpdateStatus(ticket.id, 'closed'); }}
+                        disabled={ticket.status === 'closed' || !canMoveToStatus(ticket, 'closed')}
+                        className="w-full px-4 py-2.5 text-left text-sm font-bold text-slate-700 transition-colors hover:bg-slate-50 disabled:opacity-30 dark:text-slate-200 dark:hover:bg-slate-800"
+                      >
+                        {t('Close Ticket')}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
+
+        <div className="hidden overflow-x-auto md:block">
           <table className="w-full text-left border-collapse min-w-[1000px]">
             <thead>
               <tr className="bg-slate-50/50 dark:bg-slate-800/50">
@@ -384,12 +546,13 @@ export default function AllTickets({ user }: { user: any }) {
             </thead>
             <tbody className="divide-y divide-slate-50 dark:divide-slate-800">
               <AnimatePresence mode="popLayout">
-                {filteredTickets.slice(page * rowsPerPage, page * rowsPerPage + rowsPerPage).map((ticket) => (
+                {currentTickets.map((ticket) => (
                   <motion.tr 
                     key={ticket.id} 
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, x: -12 }}
+                    transition={{ duration: 0.2 }}
                     onClick={() => window.location.href = `/tickets/${ticket.id}`}
                     className="hover:bg-slate-50/50 dark:hover:bg-slate-800/50 transition-colors group cursor-pointer"
                   >
@@ -473,7 +636,7 @@ export default function AllTickets({ user }: { user: any }) {
                               className="fixed inset-0 z-10" 
                               onClick={(e) => { e.stopPropagation(); setAnchorEl(null); }}
                             />
-                            <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-100 dark:border-slate-800 z-20 py-2 overflow-hidden">
+                            <div className="menu-surface absolute right-0 z-20 mt-2 w-48 overflow-hidden py-2">
                               <Link 
                                 to={`/tickets/${ticket.id}`}
                                 onClick={(e) => e.stopPropagation()}
@@ -492,21 +655,21 @@ export default function AllTickets({ user }: { user: any }) {
                               <div className="h-px bg-slate-100 dark:bg-slate-800 my-1" />
                               <button 
                                 onClick={(e) => { e.stopPropagation(); handleUpdateStatus(ticket.id, 'in-progress'); }}
-                                disabled={ticket.status === 'in-progress'}
+                                disabled={ticket.status === 'in-progress' || !canMoveToStatus(ticket, 'in-progress')}
                                 className="w-full text-left px-4 py-2.5 text-sm font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors disabled:opacity-30"
                               >
                                 {t('Start Work')}
                               </button>
                               <button 
                                 onClick={(e) => { e.stopPropagation(); handleUpdateStatus(ticket.id, 'resolved'); }}
-                                disabled={ticket.status === 'resolved'}
+                                disabled={ticket.status === 'resolved' || !canMoveToStatus(ticket, 'resolved')}
                                 className="w-full text-left px-4 py-2.5 text-sm font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors disabled:opacity-30"
                               >
                                 {t('Mark Resolved')}
                               </button>
                               <button 
                                 onClick={(e) => { e.stopPropagation(); handleUpdateStatus(ticket.id, 'closed'); }}
-                                disabled={ticket.status === 'closed'}
+                                disabled={ticket.status === 'closed' || !canMoveToStatus(ticket, 'closed')}
                                 className="w-full text-left px-4 py-2.5 text-sm font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors disabled:opacity-30"
                               >
                                 {t('Close Ticket')}
@@ -521,7 +684,9 @@ export default function AllTickets({ user }: { user: any }) {
               </AnimatePresence>
             </tbody>
           </table>
-          {filteredTickets.length === 0 && (
+        </div>
+
+        {filteredTickets.length === 0 && (
             <div className="py-20 text-center">
               <div className="inline-flex p-4 bg-slate-50 dark:bg-slate-800/50 rounded-full text-slate-300 dark:text-slate-700 mb-4">
                 <FileText size={48} />
@@ -534,12 +699,11 @@ export default function AllTickets({ user }: { user: any }) {
                 {t('Clear all filters')}
               </button>
             </div>
-          )}
-        </div>
+        )}
 
         {/* Pagination */}
-        <div className="px-6 py-4 bg-slate-50/50 dark:bg-slate-800/50 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-4">
+        <div className="flex flex-col gap-4 border-t border-slate-100 bg-slate-50/70 px-3 py-4 dark:border-slate-800 dark:bg-slate-800/50 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
             <p className="text-sm text-slate-500 dark:text-slate-400">
               {t('Showing')} <span className="font-bold text-slate-700 dark:text-slate-200">{Math.min(filteredTickets.length, page * rowsPerPage + 1)}</span> {t('to')} <span className="font-bold text-slate-700 dark:text-slate-200">{Math.min(filteredTickets.length, (page + 1) * rowsPerPage)}</span> {t('of')} <span className="font-bold text-slate-700 dark:text-slate-200">{filteredTickets.length}</span>
             </p>
@@ -553,7 +717,7 @@ export default function AllTickets({ user }: { user: any }) {
               ))}
             </select>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center justify-between gap-2 sm:justify-start">
             <button 
               onClick={() => setPage(p => Math.max(0, p - 1))}
               disabled={page === 0}
@@ -562,18 +726,18 @@ export default function AllTickets({ user }: { user: any }) {
               <ChevronLeft size={18} />
             </button>
             <div className="flex items-center gap-1">
-              {Array.from({ length: Math.min(5, Math.ceil(filteredTickets.length / rowsPerPage)) }).map((_, i) => (
+              {visiblePages.map((pageIndex) => (
                 <button 
-                  key={i}
-                  onClick={() => setPage(i)}
+                  key={pageIndex}
+                  onClick={() => setPage(pageIndex)}
                   className={cn(
                     "w-8 h-8 rounded-lg text-xs font-bold transition-all",
-                    page === i 
+                    page === pageIndex
                       ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" 
                       : "text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
                   )}
                 >
-                  {i + 1}
+                  {pageIndex + 1}
                 </button>
               ))}
             </div>
@@ -586,12 +750,12 @@ export default function AllTickets({ user }: { user: any }) {
             </button>
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* Assign Technician Dialog */}
       <AnimatePresence>
         {assignDialogOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-3 sm:items-center sm:p-4">
             <motion.div 
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -603,12 +767,12 @@ export default function AllTickets({ user }: { user: any }) {
               initial={{ scale: 0.9, opacity: 0, y: 20 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              className="relative w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-slate-100 dark:border-slate-800 overflow-hidden"
+              className="relative my-4 max-h-[calc(100vh-2rem)] w-full max-w-md overflow-y-auto rounded-2xl border border-slate-100 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 sm:rounded-3xl"
             >
-              <div className="p-8">
+              <div className="p-5 sm:p-8">
                 <h3 className="text-2xl font-black text-slate-900 dark:text-white mb-2">{t('Assign Technician')}</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
-                  {t('Assigning to')}: <span className="font-bold text-slate-700 dark:text-slate-200">{selectedTicket?.title}</span>
+                  {t('Assigning to')}: <span className="font-bold text-slate-700 dark:text-slate-200 break-words">{selectedTicket?.title}</span>
                 </p>
 
                 <div className="space-y-6">

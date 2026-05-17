@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Plus, Laptop, Search, Filter, Calendar, Clock, Package, Send, X, Edit2, Trash2, ChevronRight, MoreVertical } from 'lucide-react';
+import { Plus, Laptop, Search, Filter, Calendar, Clock, Package, Send, X, Edit2, Trash2, ChevronRight, MoreVertical, FileSpreadsheet, Upload } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { format } from 'date-fns';
 import { safeDate } from '../utils/dateUtils';
@@ -20,6 +20,9 @@ export default function Assets({ user }: { user: any }) {
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState(0);
   const [open, setOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importSummary, setImportSummary] = useState<any>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [maintenanceOpen, setMaintenanceOpen] = useState(false);
   const [requestOpen, setRequestOpen] = useState(false);
@@ -95,6 +98,36 @@ export default function Assets({ user }: { user: any }) {
       fetchAssets();
     } catch (err: any) {
       toast.error(err.message || 'Failed to add asset');
+    }
+  };
+
+  const readFileAsBase64 = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || '').split(',')[1] || '');
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+
+  const handleImportAssets = async (file?: File) => {
+    if (!file) return;
+    setImporting(true);
+    setImportSummary(null);
+    try {
+      const fileBase64 = await readFileAsBase64(file);
+      const res = await fetch('/api/import/assets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: fileBase64 }),
+      });
+      const summary = await handleResponse(res);
+      setImportSummary(summary);
+      toast.success(`Imported ${summary.created || 0} assets`);
+      fetchAssets();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to import assets');
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -280,6 +313,13 @@ export default function Assets({ user }: { user: any }) {
               >
                 <Filter size={18} />
                 {t('Manage Types')}
+              </button>
+              <button
+                onClick={() => setImportOpen(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-sm font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors shadow-sm"
+              >
+                <FileSpreadsheet size={18} />
+                {t('Import Excel')}
               </button>
               <button 
                 onClick={() => setOpen(true)}
@@ -601,6 +641,56 @@ export default function Assets({ user }: { user: any }) {
       )}
 
       <AnimatePresence>
+        {importOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white dark:bg-slate-900 w-full max-w-lg rounded-3xl shadow-2xl overflow-hidden border border-slate-100 dark:border-slate-800"
+            >
+              <div className="p-8">
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">{t('Import Assets')}</h2>
+                  <button onClick={() => setImportOpen(false)} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors">
+                    <X size={20} className="text-slate-400" />
+                  </button>
+                </div>
+
+                <label className="flex cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed border-blue-200 bg-blue-50/60 px-6 py-10 text-center transition-all hover:bg-blue-50 dark:border-blue-900/40 dark:bg-blue-900/10">
+                  <Upload size={28} className="text-blue-600 dark:text-blue-400" />
+                  <span className="font-black text-slate-800 dark:text-slate-100">{importing ? t('Importing...') : t('Choose Excel File')}</span>
+                  <span className="text-sm text-slate-500 dark:text-slate-400">
+                    {t('Columns')}: name, brand, type, serialNo, quantity, status, minStockLevel, isConsumable, assignedEmail, assignedDepartment
+                  </span>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls"
+                    disabled={importing}
+                    className="hidden"
+                    onChange={(e) => handleImportAssets(e.target.files?.[0])}
+                  />
+                </label>
+
+                {importSummary && (
+                  <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950/40">
+                    <p className="font-bold text-slate-800 dark:text-slate-100">
+                      {t('Created')}: {importSummary.created || 0} / {t('Skipped')}: {importSummary.skipped?.length || 0}
+                    </p>
+                    {importSummary.skipped?.length > 0 && (
+                      <div className="mt-3 max-h-36 space-y-1 overflow-y-auto text-sm text-rose-600 dark:text-rose-400">
+                        {importSummary.skipped.slice(0, 8).map((item: any) => (
+                          <p key={`${item.row}-${item.reason}`}>Row {item.row}: {item.reason}</p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {requestOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
             <motion.div 

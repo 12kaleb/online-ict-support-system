@@ -12,9 +12,39 @@ import { PrismaClient, Prisma } from "@prisma/client";
 import * as dotenv from "dotenv";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { ZodError } from "zod";
-import { allowedEmailSchema, inviteUserSchema, loginSchema, registerSchema, setupPasswordSchema } from "./schemas/auth.js";
+import * as XLSX from "xlsx";
+import { ZodError, type ZodType } from "zod";
+import { allowedEmailSchema, inviteUserSchema, loginSchema, setupPasswordSchema } from "./schemas/auth.js";
+import {
+  appealSchema,
+  approvalRequestSchema,
+  approvalResponseSchema,
+  assetMaintenanceSchema,
+  assetSchema,
+  assetTypeSchema,
+  assignTicketSchema,
+  commentSchema,
+  createTicketSchema,
+  createUserSchema,
+  delaySchema,
+  feedbackSchema,
+  maintenanceAssignSchema,
+  maintenancePartSchema,
+  maintenanceSchema,
+  quantitySchema,
+  slaPauseSchema,
+  staffReviewSchema,
+  updateAssetSchema,
+  updateMaintenanceStatusSchema,
+  updateTicketSchema,
+  updateUserPasswordSchema,
+  updateUserRoleSchema,
+  updateUserSchema,
+  updateUserStatusSchema,
+  updateManagerUserPermissionSchema,
+} from "./schemas/api.js";
 import { buildInviteUrl, sendInviteEmail } from "./services/invitations.js";
+import { getTelegramUpdates, sendTelegramMessage, sendTelegramNotification } from "./services/telegram.js";
 
 dotenv.config();
 
@@ -28,17 +58,23 @@ if (!process.env.DATABASE_URL) {
 const prisma = new PrismaClient();
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-const JWT_SECRET = process.env.JWT_SECRET || "ict-support-secret-key-123";
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET === "ict-support-secret-key-123") {
+  throw new Error("JWT_SECRET must be set to a strong unique value.");
+}
+
+const JWT_SECRET = process.env.JWT_SECRET;
 const INVITE_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const TELEGRAM_LINK_CODE_TTL_MS = 10 * 60 * 1000;
 const isAdminRole = (role?: string) => role === "admin";
 const isManagerRole = (role?: string) => role === "manager" || role === "admin";
 const isTechnicianRole = (role?: string) => role === "technician" || isManagerRole(role);
 const isStaffRole = (role?: string) => role === "staff" || isTechnicianRole(role);
+const isInventoryRole = (role?: string) => isTechnicianRole(role);
 const isActiveStatus = (status?: string) => status === "active";
 
 const allowedRoles = new Set(["staff", "technician", "manager", "admin"]);
-const privilegedInviteRoles = new Set(["manager", "technician"]);
-const PASSWORD_MIN_LENGTH = 6;
+const adminInviteRoles = new Set(["staff", "manager", "technician"]);
+const PASSWORD_MIN_LENGTH = 8;
 const JWT_COOKIE_NAME = "token";
 const HIGH_PRIORITY_LEVELS = new Set(["high", "critical"]);
 const TICKET_TEMPLATES: Record<string, { category: string; title: string; description: string; priority: string }> = {
@@ -71,12 +107,52 @@ const isProduction = process.env.NODE_ENV === "production";
 const cookieOptions: {
   httpOnly: boolean;
   secure: boolean;
-  sameSite: "none" | "lax";
+  sameSite: "lax";
 } = {
   httpOnly: true,
   secure: isProduction,
-  sameSite: isProduction ? "none" : "lax",
+  sameSite: "lax",
 };
+
+function parseOrigin(value?: string) {
+  if (!value) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+const configuredOrigins = [
+  parseOrigin(process.env.APP_BASE_URL),
+  parseOrigin(process.env.FRONTEND_ORIGIN),
+  "https://localhost:3001",
+  "http://localhost:3001",
+  "https://127.0.0.1:3001",
+  "http://127.0.0.1:3001",
+].filter(Boolean) as string[];
+
+function isAllowedOrigin(origin?: string) {
+  const parsedOrigin = parseOrigin(origin);
+  return Boolean(parsedOrigin && configuredOrigins.includes(parsedOrigin));
+}
+
+function parseCookieHeader(header?: string) {
+  return Object.fromEntries(
+    (header || "")
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const separatorIndex = part.indexOf("=");
+        if (separatorIndex === -1) return [part, ""];
+        return [
+          decodeURIComponent(part.slice(0, separatorIndex).trim()),
+          decodeURIComponent(part.slice(separatorIndex + 1).trim()),
+        ];
+      }),
+  );
+}
 
 function isMissingTableError(err: unknown) {
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
@@ -148,11 +224,94 @@ function getSLADueDate(priority?: string, from = new Date()) {
 }
 
 function isValidPassword(password?: string) {
-  return typeof password === "string" && password.length >= PASSWORD_MIN_LENGTH;
+  return typeof password === "string"
+    && password.length >= PASSWORD_MIN_LENGTH
+    && /[A-Za-z]/.test(password)
+    && /[0-9]/.test(password);
 }
 
 function normalizeStatus(value?: string) {
   return value?.trim().toLowerCase();
+}
+
+function normalizeHeader(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+}
+
+function cellText(row: Record<string, unknown>, keys: string[]) {
+  const normalizedKeys = new Set(keys.map(normalizeHeader));
+  for (const [key, value] of Object.entries(row)) {
+    if (normalizedKeys.has(normalizeHeader(key))) {
+      const text = String(value ?? "").trim();
+      return text || undefined;
+    }
+  }
+  return undefined;
+}
+
+function cellNumber(row: Record<string, unknown>, keys: string[], fallback: number) {
+  const value = cellText(row, keys);
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function cellBoolean(row: Record<string, unknown>, keys: string[], fallback = false) {
+  const value = cellText(row, keys);
+  if (value === undefined) return fallback;
+  return ["true", "yes", "y", "1", "consumable"].includes(value.toLowerCase());
+}
+
+function parseExcelRows(fileBase64: unknown) {
+  if (typeof fileBase64 !== "string" || !fileBase64.trim()) {
+    const err = new Error("Excel file is required.") as Error & { status?: number };
+    err.status = 400;
+    throw err;
+  }
+
+  if (fileBase64.length > 7_000_000) {
+    const err = new Error("Excel file is too large. The maximum encoded size is 7 MB.") as Error & { status?: number };
+    err.status = 413;
+    throw err;
+  }
+
+  const buffer = Buffer.from(fileBase64.replace(/^data:.*;base64,/, ""), "base64");
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) {
+    const err = new Error("The Excel file does not contain any sheets.") as Error & { status?: number };
+    err.status = 400;
+    throw err;
+  }
+
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[sheetName], {
+    defval: "",
+  });
+
+  if (rows.length > 1000) {
+    const err = new Error("Excel import is limited to 1000 rows at a time.") as Error & { status?: number };
+    err.status = 413;
+    throw err;
+  }
+
+  return rows;
+}
+
+const TICKET_STATUS_RANK: Record<string, number> = {
+  open: 0,
+  "in-progress": 1,
+  "pending-confirmation": 2,
+  resolved: 3,
+  closed: 4,
+};
+
+function isBackwardTicketStatusChange(from: string, to: string) {
+  const fromRank = TICKET_STATUS_RANK[from];
+  const toRank = TICKET_STATUS_RANK[to];
+  return fromRank !== undefined && toRank !== undefined && toRank < fromRank;
 }
 
 function shouldRequireClosureApproval(ticket: { priority?: string }) {
@@ -175,6 +334,10 @@ function verifyAuthToken(token: string) {
   return jwt.verify(token, JWT_SECRET) as AuthTokenPayload;
 }
 
+function generateTelegramLinkCode() {
+  return randomBytes(4).toString("hex").toUpperCase();
+}
+
 async function hashPassword(password: string) {
   return bcrypt.hash(password, 12);
 }
@@ -182,6 +345,54 @@ async function hashPassword(password: string) {
 function formatValidationError(error: ZodError) {
   const issue = error.issues[0];
   return issue?.message || "Invalid request payload.";
+}
+
+function parseBody<T>(schema: ZodType<T>, body: unknown) {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    const err = new Error(formatValidationError(parsed.error)) as Error & { status?: number; code?: string };
+    err.status = 400;
+    err.code = "VALIDATION_ERROR";
+    throw err;
+  }
+
+  return parsed.data;
+}
+
+async function getTechnicianActiveWork(
+  technicianId: string,
+  options?: { excludeTicketId?: string; excludeMaintenanceId?: string },
+) {
+  const [ticket, maintenance] = await Promise.all([
+    prisma.ticket.findFirst({
+      where: {
+        assignedTo: technicianId,
+        status: { notIn: ["pending-confirmation", "resolved", "closed"] },
+        ...(options?.excludeTicketId ? { NOT: { id: options.excludeTicketId } } : {}),
+      },
+      select: { id: true, title: true },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.maintenance.findFirst({
+      where: {
+        technicianId,
+        status: { not: "completed" },
+        ...(options?.excludeMaintenanceId ? { NOT: { id: options.excludeMaintenanceId } } : {}),
+      },
+      select: { id: true, title: true },
+      orderBy: { startTime: "asc" },
+    }),
+  ]);
+
+  if (ticket) {
+    return `Technician already has an active ticket: ${ticket.title}.`;
+  }
+
+  if (maintenance) {
+    return `Technician already has active maintenance: ${maintenance.title}.`;
+  }
+
+  return null;
 }
 
 async function writeAuditLog(actor: any, action: string, details: Record<string, unknown>) {
@@ -320,33 +531,160 @@ async function ensureApprovalRequest(input: {
   });
 }
 
+async function handleTelegramLinkMessage(chatId: string, text?: string) {
+  const match = text?.trim().match(/^\/start\s+([A-Z0-9]+)$/i);
+  if (!match) {
+    await sendTelegramMessage(
+      chatId,
+      "Open your ICT Support profile, choose Connect Telegram, then send the /start command with your link code.",
+    );
+    return;
+  }
+
+  const code = match[1].toUpperCase();
+  const profile = await prisma.profile.findFirst({
+    where: {
+      telegramLinkCode: code,
+      telegramLinkCodeExpiresAt: { gt: new Date() },
+    },
+    select: { id: true, name: true },
+  });
+
+  if (!profile) {
+    await sendTelegramMessage(chatId, "That Telegram link code is invalid or expired. Please generate a new code from your profile.");
+    return;
+  }
+
+  await prisma.$transaction([
+    prisma.profile.updateMany({
+      where: {
+        telegramChatId: chatId,
+        NOT: { id: profile.id },
+      },
+      data: { telegramChatId: null },
+    }),
+    prisma.profile.update({
+      where: { id: profile.id },
+      data: {
+        telegramChatId: chatId,
+        telegramLinkCode: null,
+        telegramLinkCodeExpiresAt: null,
+      },
+    }),
+  ]);
+
+  await sendTelegramMessage(chatId, `Telegram connected for ${profile.name}. You will now receive ICT Support notifications here.`);
+}
+
+function startTelegramLinkPolling() {
+  if (!process.env.TELEGRAM_BOT_TOKEN) {
+    return;
+  }
+
+  let offset: number | undefined;
+  let polling = false;
+
+  const poll = async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      const updates = await getTelegramUpdates(offset);
+      for (const update of updates) {
+        offset = update.update_id + 1;
+        const chatId = update.message?.chat?.id;
+        if (chatId !== undefined) {
+          await handleTelegramLinkMessage(String(chatId), update.message?.text);
+        }
+      }
+    } catch (err) {
+      console.warn("Telegram link polling failed:", err);
+    } finally {
+      polling = false;
+    }
+  };
+
+  poll();
+  setInterval(poll, 5000);
+}
+
 async function startServer() {
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
     cors: {
-      origin: "*",
-      methods: ["GET", "POST"]
+      origin: configuredOrigins,
+      credentials: true,
+      methods: ["GET", "POST"],
     }
   });
   const PORT = 3000;
 
+  io.use(async (socket, next) => {
+    try {
+      const cookies = parseCookieHeader(socket.handshake.headers.cookie);
+      const token = cookies[JWT_COOKIE_NAME];
+      if (!token) return next(new Error("Unauthorized"));
+
+      const payload = verifyAuthToken(token);
+      const profile = await prisma.profile.findUnique({ where: { id: payload.sub } });
+      if (!profile || !isActiveStatus(profile.status)) {
+        return next(new Error("Unauthorized"));
+      }
+
+      socket.data.userId = profile.id;
+      next();
+    } catch {
+      next(new Error("Unauthorized"));
+    }
+  });
+
   io.on("connection", (socket) => {
     console.log("Client connected:", socket.id);
-    socket.on("join", (userId) => {
-      socket.join(userId);
-      console.log(`User ${userId} joined their notification room`);
-    });
+    socket.join(socket.data.userId);
+    console.log(`User ${socket.data.userId} joined their notification room`);
     socket.on("disconnect", () => {
       console.log("Client disconnected:", socket.id);
     });
   });
 
-  app.use(cors());
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ limit: '50mb', extended: true }));
+  app.use(cors({
+    origin(origin, callback) {
+      if (!origin || isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error("Origin is not allowed."));
+    },
+    credentials: true,
+  }));
+  app.use((req, res, next) => {
+    if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method) || !req.path.startsWith("/api")) {
+      return next();
+    }
+
+    const origin = req.get("origin");
+    if (origin && !isAllowedOrigin(origin)) {
+      return res.status(403).json({ error: "Origin is not allowed." });
+    }
+
+    if (isProduction && !origin) {
+      return res.status(403).json({ error: "Origin header is required." });
+    }
+
+    next();
+  });
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ limit: '10mb', extended: true }));
   app.use(cookieParser());
   app.set("trust proxy", 1);
+  app.param("id", (req, res, next, id) => {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(id)) {
+      return res.status(400).json({ error: "Invalid ID format." });
+    }
+    next();
+  });
 
   // --- Auth Middleware ---
   const authenticate = async (req: any, res: any, next: any) => {
@@ -365,8 +703,10 @@ async function startServer() {
         email: profile.email,
         role: profile.role,
         status: profile.status,
+        canInviteStaff: profile.canInviteStaff,
         name: profile.name,
         department: profile.department,
+        telegramLinked: Boolean(profile.telegramChatId),
         createdAt: profile.createdAt,
       };
       next();
@@ -397,6 +737,13 @@ async function startServer() {
     next();
   };
 
+  const isInventoryManager = (req: any, res: any, next: any) => {
+    if (!isInventoryRole(req.user.role)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    next();
+  };
+
   // --- Helper: Create Notification ---
   const createNotification = async (userId: string, title: string, message: string, link?: string) => {
     try {
@@ -405,6 +752,18 @@ async function startServer() {
       });
       // Emit real-time notification
       io.to(userId).emit("notification", notification);
+      const recipient = await prisma.profile.findUnique({
+        where: { id: userId },
+        select: { name: true, email: true, telegramChatId: true },
+      });
+      await sendTelegramNotification({
+        chatId: recipient?.telegramChatId,
+        recipientName: recipient?.name,
+        recipientEmail: recipient?.email,
+        title,
+        message,
+        link,
+      });
       // Also emit to managers for certain types if needed, but for now just the user
     } catch (err) {
       console.error("Failed to create notification:", err);
@@ -417,7 +776,7 @@ async function startServer() {
       const now = new Date();
       const openTickets = await prisma.ticket.findMany({
         where: {
-          status: { notIn: ["closed", "resolved"] },
+          status: { notIn: ["pending-confirmation", "closed", "resolved"] },
           dueDate: { not: null }
         },
         include: {
@@ -505,66 +864,10 @@ async function startServer() {
   });
 
   // Auth
-  app.post("/api/auth/register", async (req, res, next) => {
-    try {
-      const parsed = registerSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: formatValidationError(parsed.error) });
-      }
-
-      const { name, email, password, department } = parsed.data;
-      const normalizedEmail = normalizeEmail(email);
-      const existingProfile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
-      if (existingProfile) {
-        return res.status(400).json({ error: "A user with this email already exists." });
-      }
-
-      const passwordHash = await hashPassword(password);
-      const profile = await prisma.profile.create({
-        data: {
-          name,
-          email: normalizedEmail,
-          department,
-          role: "staff",
-          status: "pending",
-          passwordHash,
-        },
-      });
-
-      const admins = await prisma.profile.findMany({
-        where: {
-          role: "admin",
-          status: "active",
-        },
-        select: { id: true },
-      });
-
-      await Promise.all(
-        admins.map((admin) =>
-          createNotification(
-            admin.id,
-            "New staff signup pending approval",
-            `${profile.name} (${profile.email}) has requested staff access and is waiting for approval.`,
-            "/admin",
-          ),
-        ),
-      );
-
-      res.json({
-        message: "Registration submitted. An administrator must approve your account before you can sign in.",
-        user: {
-          id: profile.id,
-          name: profile.name,
-          email: profile.email,
-          role: profile.role,
-          status: profile.status,
-          department: profile.department,
-          createdAt: profile.createdAt,
-        },
-      });
-    } catch (err) {
-      next(err);
-    }
+  app.post("/api/auth/register", (_req, res) => {
+    res.status(403).json({
+      error: "Public signup is disabled. Ask an administrator for an invitation link.",
+    });
   });
 
   app.post("/api/auth/login", async (req, res, next) => {
@@ -601,6 +904,7 @@ async function startServer() {
         email: profile.email,
         role: profile.role,
         status: profile.status,
+        canInviteStaff: profile.canInviteStaff,
         department: profile.department,
         createdAt: profile.createdAt,
       });
@@ -609,7 +913,7 @@ async function startServer() {
     }
   });
 
-  app.post(["/api/admin/create-user", "/api/auth/admin/create-user", "/api/auth/invitations"], authenticate, isAdmin, async (req, res, next) => {
+  app.post(["/api/admin/create-user", "/api/auth/admin/create-user", "/api/auth/invitations"], authenticate, async (req: any, res, next) => {
     try {
       const parsed = inviteUserSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -617,7 +921,19 @@ async function startServer() {
       }
 
       const { email, name, role, department } = parsed.data;
-      if (!privilegedInviteRoles.has(role)) {
+      if (isAdminRole(req.user.role)) {
+        if (!adminInviteRoles.has(role)) {
+          return res.status(400).json({ error: "Invalid role for invitation." });
+        }
+      } else if (req.user.role === "manager" && req.user.canInviteStaff) {
+        if (role !== "staff") {
+          return res.status(403).json({ error: "Managers can only invite staff users." });
+        }
+      } else {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      if (!adminInviteRoles.has(role)) {
         return res.status(400).json({ error: "Invalid role for invitation." });
       }
 
@@ -681,7 +997,7 @@ async function startServer() {
         name,
         role,
         department,
-        inviteUrl,
+        inviteDelivery: mailResult.delivered ? "email" : "response",
       });
 
       res.json({
@@ -697,6 +1013,118 @@ async function startServer() {
           createdAt: profile.createdAt,
         },
       });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/api/import/users", authenticate, async (req: any, res, next) => {
+    try {
+      const rows = parseExcelRows(req.body?.file);
+      const result = {
+        created: 0,
+        updated: 0,
+        skipped: [] as Array<{ row: number; reason: string }>,
+      };
+
+      for (const [index, row] of rows.entries()) {
+        const rowNumber = index + 2;
+        const role = (cellText(row, ["role"]) || "staff").toLowerCase();
+        const payload = {
+          name: cellText(row, ["name", "full name"]),
+          email: cellText(row, ["email", "email address"]),
+          role,
+          department: cellText(row, ["department", "dept"]),
+        };
+
+        const parsed = inviteUserSchema.safeParse(payload);
+        if (!parsed.success) {
+          result.skipped.push({ row: rowNumber, reason: formatValidationError(parsed.error) });
+          continue;
+        }
+
+        if (isAdminRole(req.user.role)) {
+          if (!adminInviteRoles.has(parsed.data.role)) {
+            result.skipped.push({ row: rowNumber, reason: "Invalid role for invitation." });
+            continue;
+          }
+        } else if (req.user.role === "manager" && req.user.canInviteStaff) {
+          if (parsed.data.role !== "staff") {
+            result.skipped.push({ row: rowNumber, reason: "Managers can only import staff users." });
+            continue;
+          }
+        } else {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+
+        const normalizedEmail = normalizeEmail(parsed.data.email);
+        const existingProfile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
+        if (existingProfile && existingProfile.status === "active") {
+          result.skipped.push({ row: rowNumber, reason: "A user with this email already exists." });
+          continue;
+        }
+
+        const token = randomBytes(32).toString("hex");
+        const expiresAt = new Date(Date.now() + INVITE_TOKEN_TTL_MS);
+        const profile = await prisma.$transaction(async (tx) => {
+          const pendingProfile = existingProfile
+            ? await tx.profile.update({
+                where: { id: existingProfile.id },
+                data: {
+                  name: parsed.data.name,
+                  email: normalizedEmail,
+                  role: parsed.data.role,
+                  status: "pending",
+                  department: parsed.data.department,
+                  passwordHash: null,
+                },
+              })
+            : await tx.profile.create({
+                data: {
+                  name: parsed.data.name,
+                  email: normalizedEmail,
+                  role: parsed.data.role,
+                  status: "pending",
+                  department: parsed.data.department,
+                  passwordHash: null,
+                },
+              });
+
+          await tx.inviteToken.deleteMany({ where: { userId: pendingProfile.id } });
+          await tx.inviteToken.create({
+            data: {
+              token,
+              userId: pendingProfile.id,
+              expiresAt,
+            },
+          });
+
+          return pendingProfile;
+        });
+
+        const inviteUrl = buildInviteUrl(token);
+        await sendInviteEmail({
+          email: normalizedEmail,
+          name: parsed.data.name,
+          role: parsed.data.role,
+          inviteUrl,
+        });
+
+        await writeAuditLog(req.user, "user.imported", {
+          targetUserId: profile.id,
+          email: normalizedEmail,
+          role: parsed.data.role,
+          department: parsed.data.department,
+        });
+
+        if (existingProfile) {
+          result.updated += 1;
+        } else {
+          result.created += 1;
+        }
+      }
+
+      res.json(result);
     } catch (err) {
       next(err);
     }
@@ -748,6 +1176,7 @@ async function startServer() {
           email: updatedUser.email,
           role: updatedUser.role,
           status: updatedUser.status,
+          canInviteStaff: updatedUser.canInviteStaff,
         },
       });
     } catch (err) {
@@ -762,6 +1191,49 @@ async function startServer() {
 
   app.get("/api/auth/me", authenticate, (req: any, res) => {
     res.json(req.user);
+  });
+
+  app.post("/api/profile/telegram/link-code", authenticate, async (req: any, res, next) => {
+    try {
+      const code = generateTelegramLinkCode();
+      const expiresAt = new Date(Date.now() + TELEGRAM_LINK_CODE_TTL_MS);
+
+      await prisma.profile.update({
+        where: { id: req.user.id },
+        data: {
+          telegramLinkCode: code,
+          telegramLinkCodeExpiresAt: expiresAt,
+        },
+      });
+
+      const botUsername = process.env.TELEGRAM_BOT_USERNAME?.replace(/^@/, "");
+      res.json({
+        code,
+        expiresAt,
+        command: `/start ${code}`,
+        botUsername: botUsername || null,
+        botLink: botUsername ? `https://t.me/${botUsername}?start=${code}` : null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.delete("/api/profile/telegram", authenticate, async (req: any, res, next) => {
+    try {
+      await prisma.profile.update({
+        where: { id: req.user.id },
+        data: {
+          telegramChatId: null,
+          telegramLinkCode: null,
+          telegramLinkCodeExpiresAt: null,
+        },
+      });
+
+      res.json({ telegramLinked: false });
+    } catch (err) {
+      next(err);
+    }
   });
 
   app.get("/api/admin/allowed-emails", authenticate, isAdmin, async (req, res, next) => {
@@ -833,6 +1305,8 @@ async function startServer() {
       let where: any = {};
       if (req.user.role === "technician") {
         where = { assignedTo: req.user.id };
+      } else if (req.user.role === "staff") {
+        where = { userId: req.user.id };
       }
 
       const tickets = await prisma.ticket.findMany({
@@ -886,15 +1360,19 @@ async function startServer() {
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
       // Authorization Check
-      const isStaff = isStaffRole(req.user.role);
       const isOwner = ticket.userId === req.user.id;
       const isAssigned = ticket.assignedTo === req.user.id;
+      const isPrivileged = isManagerRole(req.user.role);
 
       if (req.user.role === "technician" && !isAssigned) {
         return res.status(403).json({ error: "Technicians can only view assigned tickets" });
       }
 
-      if (!isStaff && !isOwner) {
+      if (req.user.role === "staff" && !isOwner) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      if (!isPrivileged && !isAssigned && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -906,7 +1384,7 @@ async function startServer() {
 
   app.post("/api/tickets", authenticate, async (req: any, res, next) => {
     try {
-      const { title, description, category, priority, assetId, attachments, templateKey } = req.body;
+      const { title, description, category, priority, assetId, attachments, templateKey, location } = parseBody(createTicketSchema, req.body);
       const template = templateKey ? TICKET_TEMPLATES[templateKey] : null;
       const resolvedCategory = category || template?.category || "Other";
       const resolvedPriority = priority || template?.priority || "medium";
@@ -928,6 +1406,9 @@ async function startServer() {
           templateKey: templateKey || null,
           userId: req.user.id,
           assetId: assetId || null,
+          locationLatitude: location?.latitude ?? null,
+          locationLongitude: location?.longitude ?? null,
+          locationAccuracy: location?.accuracy ?? null,
           dueDate,
           slaStatus: "on-track",
           attachments: attachments ? {
@@ -960,10 +1441,14 @@ async function startServer() {
 
   app.put("/api/tickets/:id", authenticate, isStaff, async (req: any, res, next) => {
     try {
-      const { status, assignedTo, priority } = req.body;
+      const { status, assignedTo, priority } = parseBody(updateTicketSchema, req.body);
       const oldTicket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       
       if (!oldTicket) return res.status(404).json({ error: "Ticket not found" });
+
+      if (req.user.role === "staff" && oldTicket.userId !== req.user.id) {
+        return res.status(403).json({ error: "Requesters can only update their own tickets" });
+      }
 
       // Technician can only update assigned tickets
       if (req.user.role === "technician" && oldTicket.assignedTo !== req.user.id) {
@@ -975,13 +1460,34 @@ async function startServer() {
         if (!isManagerRole(req.user.role)) {
           return res.status(403).json({ error: "Only managers can assign technicians" });
         }
+
+        if (assignedTo) {
+          const tech = await prisma.profile.findUnique({ where: { id: assignedTo } });
+          if (!tech || tech.role !== "technician") {
+            return res.status(400).json({ error: "Invalid technician ID" });
+          }
+
+          const activeWork = await getTechnicianActiveWork(assignedTo, { excludeTicketId: oldTicket.id });
+          if (activeWork) {
+            return res.status(400).json({ error: activeWork });
+          }
+        }
       }
 
-      const normalizedStatus = normalizeStatus(status);
+      const requestedStatus = normalizeStatus(status);
+      const normalizedStatus = req.user.role === "technician" && requestedStatus === "resolved"
+        ? "pending-confirmation"
+        : requestedStatus;
 
       // Role-based status transition checks
       if (normalizedStatus && normalizedStatus !== oldTicket.status) {
-        if (req.user.role === "technician" && !["in-progress", "resolved"].includes(normalizedStatus)) {
+        if (TICKET_STATUS_RANK[normalizedStatus] === undefined) {
+          return res.status(400).json({ error: "Invalid ticket status" });
+        }
+        if (isBackwardTicketStatusChange(oldTicket.status, normalizedStatus)) {
+          return res.status(400).json({ error: "Ticket status cannot move backward. Closed tickets can be appealed by the requester." });
+        }
+        if (req.user.role === "technician" && !["in-progress", "pending-confirmation"].includes(normalizedStatus)) {
           return res.status(403).json({ error: "Technicians can only set status to in-progress or resolved" });
         }
         if (req.user.role === "staff" && !["open", "closed"].includes(normalizedStatus)) {
@@ -1007,6 +1513,11 @@ async function startServer() {
         priority: priority || undefined,
       };
 
+      if (normalizedStatus === "pending-confirmation") {
+        updateData.resolvedAt = new Date();
+        updateData.closedAt = null;
+      }
+
       if (normalizedStatus === "resolved") {
         updateData.resolvedAt = new Date();
         updateData.closedAt = null;
@@ -1026,7 +1537,7 @@ async function startServer() {
         }
       }
 
-      if (normalizedStatus && ["resolved", "closed"].includes(normalizedStatus)) {
+      if (normalizedStatus && ["pending-confirmation", "resolved", "closed"].includes(normalizedStatus)) {
         updateData.slaPaused = false;
         updateData.slaPausedAt = null;
         updateData.slaPausedRemainingMinutes = null;
@@ -1064,7 +1575,7 @@ async function startServer() {
         await logTicketHistory(ticket.id, req.user.id, "Assigned To", `Assigned to ${tech?.name || "Unassigned"}`);
       }
 
-      if (normalizedStatus === "resolved" && shouldRequireClosureApproval(ticket)) {
+      if (["pending-confirmation", "resolved"].includes(normalizedStatus || "") && shouldRequireClosureApproval(ticket)) {
         const approvalRequest = await ensureApprovalRequest({
           type: "high-priority-ticket-close",
           requestedById: req.user.id,
@@ -1098,15 +1609,23 @@ async function startServer() {
   // Manager specific actions
   app.put("/api/tickets/:id/assign", authenticate, isManager, async (req: any, res, next) => {
     try {
-      const { assignedTo } = req.body;
+      const { assignedTo } = parseBody(assignTicketSchema, req.body);
       const exists = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Ticket not found" });
+      if (isBackwardTicketStatusChange(exists.status, "in-progress")) {
+        return res.status(400).json({ error: "Assigning a technician cannot move a resolved or closed ticket back to in progress." });
+      }
 
       // If assigning to someone, verify they are a technician
       if (assignedTo) {
         const tech = await prisma.profile.findUnique({ where: { id: assignedTo } });
         if (!tech || tech.role !== "technician") {
           return res.status(400).json({ error: "Invalid technician ID" });
+        }
+
+        const activeWork = await getTechnicianActiveWork(assignedTo, { excludeTicketId: exists.id });
+        if (activeWork) {
+          return res.status(400).json({ error: activeWork });
         }
       }
 
@@ -1168,45 +1687,27 @@ async function startServer() {
 
   app.put("/api/tickets/:id/staff-review", authenticate, async (req: any, res, next) => {
     try {
-      const { approved } = req.body;
+      const { approved } = parseBody(staffReviewSchema, req.body);
       const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
       if (req.user.role !== "staff") return res.status(403).json({ error: "Forbidden" });
       if (ticket.userId !== req.user.id) return res.status(403).json({ error: "Forbidden" });
-      if (ticket.status !== "resolved") {
-        return res.status(400).json({ error: "Only resolved tickets can be reviewed" });
+      const isAwaitingRequesterConfirmation = ticket.status === "pending-confirmation" || (ticket.status === "resolved" && !ticket.isApproved);
+      if (!isAwaitingRequesterConfirmation) {
+        return res.status(400).json({ error: "Only tickets awaiting confirmation can be reviewed" });
       }
-
-      const reviewUpdateData: any = approved
-        ? { status: "resolved", isApproved: true, closedAt: null }
-        : {
-            status: "open",
-            isApproved: false,
-            isDelayed: false,
-            delayReason: null,
-            slaPaused: false,
-            slaPausedAt: null,
-            slaPausedRemainingMinutes: null,
-            blockingReason: null,
-            blockedAt: null,
-            slaStatus: "on-track",
-          };
+      if (!approved) {
+        return res.status(400).json({ error: "Resolved tickets cannot be reopened. If a closed ticket still needs work, submit an appeal." });
+      }
 
       const updatedTicket = await prisma.ticket.update({
         where: { id: req.params.id },
-        data: reviewUpdateData,
+        data: { status: "resolved", isApproved: true, closedAt: null },
       });
 
-      if (approved) {
-        await logTicketHistory(ticket.id, req.user.id, "Resolved and Approved", "Confirmed as solved by requester");
-        if (ticket.assignedTo) {
-          await createNotification(ticket.assignedTo, "Ticket Confirmed Solved", `The requester confirmed ticket "${ticket.title}" is solved.`, `/tickets/${ticket.id}`);
-        }
-      } else {
-        await logTicketHistory(ticket.id, req.user.id, "Status Changed", "Reopened by requester because issue is not solved");
-        if (ticket.assignedTo) {
-          await createNotification(ticket.assignedTo, "Ticket Reopened", `The requester reported that ticket "${ticket.title}" is not solved yet.`, `/tickets/${ticket.id}`);
-        }
+      await logTicketHistory(ticket.id, req.user.id, "Resolved and Approved", "Confirmed as solved by requester");
+      if (ticket.assignedTo) {
+        await createNotification(ticket.assignedTo, "Ticket Confirmed Solved", `The requester confirmed ticket "${ticket.title}" is solved.`, `/tickets/${ticket.id}`);
       }
 
       res.json(updatedTicket);
@@ -1215,10 +1716,52 @@ async function startServer() {
     }
   });
 
+  app.post("/api/tickets/:id/appeal", authenticate, async (req: any, res, next) => {
+    try {
+      const { reason } = parseBody(appealSchema, req.body);
+      const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
+      if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+      if (req.user.role !== "staff") return res.status(403).json({ error: "Forbidden" });
+      if (ticket.userId !== req.user.id) return res.status(403).json({ error: "Forbidden" });
+      if (ticket.status !== "closed") {
+        return res.status(400).json({ error: "Only closed tickets can be appealed." });
+      }
+      const appeal = await ensureApprovalRequest({
+        type: "closed-ticket-appeal",
+        requestedById: req.user.id,
+        reason,
+        ticketId: ticket.id,
+      });
+
+      const managers = await prisma.profile.findMany({
+        where: { role: { in: ["manager", "admin"] } },
+        select: { id: true },
+      });
+      for (const manager of managers) {
+        await createNotification(
+          manager.id,
+          "Ticket Appeal Submitted",
+          `${req.user.name} appealed closed ticket "${ticket.title}".`,
+          `/tickets/${ticket.id}`,
+        );
+      }
+
+      await logTicketHistory(ticket.id, req.user.id, "Appeal Submitted", reason);
+      await writeAuditLog(req.user, "ticket.appeal_submitted", {
+        ticketId: ticket.id,
+        approvalRequestId: appeal.id,
+      });
+
+      res.json(appeal);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Feedback
   app.post("/api/tickets/:id/feedback", authenticate, async (req: any, res, next) => {
     try {
-      const { rating, comment } = req.body;
+      const { rating, comment } = parseBody(feedbackSchema, req.body);
       
       const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
@@ -1362,10 +1905,9 @@ async function startServer() {
     }
   });
 
-  app.post("/api/asset-types", authenticate, isStaff, async (req, res, next) => {
+  app.post("/api/asset-types", authenticate, isInventoryManager, async (req, res, next) => {
     try {
-      const { name } = req.body;
-      if (!name) return res.status(400).json({ error: "Name is required" });
+      const { name } = parseBody(assetTypeSchema, req.body);
       
       const existing = await prisma.assetType.findUnique({ where: { name } });
       if (existing) return res.status(400).json({ error: "Asset type already exists" });
@@ -1377,7 +1919,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/asset-types/:id", authenticate, isStaff, async (req, res, next) => {
+  app.delete("/api/asset-types/:id", authenticate, isInventoryManager, async (req, res, next) => {
     try {
       const { id } = req.params;
       
@@ -1394,12 +1936,12 @@ async function startServer() {
     }
   });
 
-  app.post("/api/assets", authenticate, isStaff, async (req, res, next) => {
+  app.post("/api/assets", authenticate, isInventoryManager, async (req, res, next) => {
     try {
-      const { name, brand, type, typeId, serialNo, quantity, status, minStockLevel, isConsumable, assignedUserId, assignedDepartment } = req.body;
-      const normalizedQuantity = Math.max(1, parseInt(quantity?.toString() || "1"));
-      const normalizedIsConsumable = Boolean(isConsumable);
-      const normalizedMinStockLevel = Math.max(0, parseInt(minStockLevel?.toString() || "0"));
+      const { name, brand, type, typeId, serialNo, quantity, status, minStockLevel, isConsumable, assignedUserId, assignedDepartment } = parseBody(assetSchema, req.body);
+      const normalizedQuantity = quantity;
+      const normalizedIsConsumable = isConsumable;
+      const normalizedMinStockLevel = minStockLevel;
       
       if (serialNo) {
         const existing = await prisma.asset.findUnique({ where: { serialNo } });
@@ -1481,14 +2023,159 @@ async function startServer() {
     }
   });
 
+  app.post("/api/import/assets", authenticate, isInventoryManager, async (req: any, res, next) => {
+    try {
+      const rows = parseExcelRows(req.body?.file);
+      const result = {
+        created: 0,
+        skipped: [] as Array<{ row: number; reason: string }>,
+      };
+
+      for (const [index, row] of rows.entries()) {
+        const rowNumber = index + 2;
+        const typeName = cellText(row, ["type", "asset type", "category"]) || "Other";
+        const assignedEmail = cellText(row, ["assigned email", "assigned user email", "user email"]);
+        let typeId: string | null = null;
+        let assignedUserId: string | null = null;
+
+        const assetType = await prisma.assetType.upsert({
+          where: { name: typeName },
+          update: {},
+          create: { name: typeName },
+        });
+        typeId = assetType.id;
+
+        if (assignedEmail) {
+          const assignedUser = await prisma.profile.findUnique({
+            where: { email: normalizeEmail(assignedEmail) },
+            select: { id: true },
+          });
+          if (!assignedUser) {
+            result.skipped.push({ row: rowNumber, reason: `Assigned user ${assignedEmail} was not found.` });
+            continue;
+          }
+          assignedUserId = assignedUser.id;
+        }
+
+        const payload = {
+          name: cellText(row, ["name", "asset name"]),
+          brand: cellText(row, ["brand", "manufacturer"]),
+          type: typeName,
+          typeId,
+          serialNo: cellText(row, ["serial no", "serial number", "serial"]),
+          quantity: cellNumber(row, ["quantity", "qty"], 1),
+          status: (cellText(row, ["status"]) || "active").toLowerCase(),
+          minStockLevel: cellNumber(row, ["min stock level", "min stock", "minimum stock"], 0),
+          isConsumable: cellBoolean(row, ["is consumable", "consumable", "spare part"], false),
+          assignedUserId,
+          assignedDepartment: cellText(row, ["assigned department", "department"]),
+        };
+
+        const parsed = assetSchema.safeParse(payload);
+        if (!parsed.success) {
+          result.skipped.push({ row: rowNumber, reason: formatValidationError(parsed.error) });
+          continue;
+        }
+
+        const { name, brand, type, serialNo, quantity, status, minStockLevel, isConsumable, assignedDepartment } = parsed.data;
+        if (serialNo) {
+          const existing = await prisma.asset.findUnique({ where: { serialNo } });
+          if (existing) {
+            result.skipped.push({ row: rowNumber, reason: "Asset with this Serial Number already exists." });
+            continue;
+          }
+        }
+
+        if (!isConsumable && serialNo && quantity > 1) {
+          result.skipped.push({ row: rowNumber, reason: "A serialized device can only be imported as a single unit." });
+          continue;
+        }
+
+        const catalog = await prisma.assetCatalog.create({
+          data: {
+            name,
+            brand: brand || null,
+            type: type || "Other",
+            typeId,
+            isConsumable,
+            minStockLevel,
+          },
+        });
+
+        const createdAssets = isConsumable
+          ? [
+              await prisma.asset.create({
+                data: {
+                  catalogId: catalog.id,
+                  name,
+                  brand: brand || null,
+                  type: type || "Other",
+                  typeId,
+                  serialNo: null,
+                  quantity,
+                  minStockLevel,
+                  isConsumable: true,
+                  status,
+                  assignedUserId,
+                  assignedDepartment: assignedDepartment || null,
+                },
+              }),
+            ]
+          : await Promise.all(
+              Array.from({ length: quantity }, (_, unitIndex) =>
+                prisma.asset.create({
+                  data: {
+                    catalogId: catalog.id,
+                    name,
+                    brand: brand || null,
+                    type: type || "Other",
+                    typeId,
+                    serialNo: unitIndex === 0 ? serialNo || null : null,
+                    quantity: 1,
+                    minStockLevel,
+                    isConsumable: false,
+                    status,
+                    assignedUserId,
+                    assignedDepartment: assignedDepartment || null,
+                  },
+                }),
+              ),
+            );
+
+        await Promise.all(
+          createdAssets.map((asset) =>
+            logAssetHistory(asset.id, "created", `Asset ${asset.name} imported from Excel`, {
+              userId: req.user.id,
+            }),
+          ),
+        );
+
+        result.created += createdAssets.length;
+      }
+
+      await writeAuditLog(req.user, "assets.imported", {
+        created: result.created,
+        skipped: result.skipped.length,
+      });
+
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // Asset Usage
   app.post("/api/tickets/:id/usage", authenticate, isStaff, async (req: any, res, next) => {
     try {
-      const { assetId, quantity } = req.body;
+      const { assetId, quantity } = parseBody(maintenancePartSchema.pick({ assetId: true, quantity: true }), req.body);
       const ticketId = req.params.id;
 
       const ticket = await prisma.ticket.findUnique({ where: { id: ticketId } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+
+      if (req.user.role === "staff" && ticket.userId !== req.user.id) {
+        return res.status(403).json({ error: "Requesters can only add asset usage to their own tickets" });
+      }
 
       // Technician can only add usage to assigned tickets
       if (req.user.role === "technician" && ticket.assignedTo !== req.user.id) {
@@ -1564,9 +2251,9 @@ async function startServer() {
     }
   });
 
-  app.post("/api/assets/:id/maintenance", authenticate, isStaff, async (req, res, next) => {
+  app.post("/api/assets/:id/maintenance", authenticate, isInventoryManager, async (req, res, next) => {
     try {
-      const { type, scheduledDate, description } = req.body;
+      const { type, scheduledDate, description } = parseBody(assetMaintenanceSchema, req.body);
       const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
       if (!asset) return res.status(404).json({ error: "Asset not found" });
       if (asset.isConsumable) {
@@ -1601,9 +2288,9 @@ async function startServer() {
     }
   });
 
-  app.put("/api/assets/maintenance/:id", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/assets/maintenance/:id", authenticate, isInventoryManager, async (req, res, next) => {
     try {
-      const { status } = req.body;
+      const { status } = parseBody(updateMaintenanceStatusSchema, req.body);
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Maintenance record not found" });
       if (status === "completed" && !exists.technicianId) {
@@ -1671,7 +2358,7 @@ async function startServer() {
     try {
       const assetId = req.params.id;
       const userId = req.user.id;
-      const { quantity } = req.body;
+      const { quantity } = parseBody(quantitySchema, req.body);
       
       // Basic UUID validation to prevent Prisma error on malformed ID
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1685,8 +2372,7 @@ async function startServer() {
         return res.status(400).json({ error: "Assets under maintenance cannot be requested" });
       }
 
-      const requestedQty = parseInt(quantity?.toString() || "1");
-      if (requestedQty <= 0) return res.status(400).json({ error: "Invalid quantity" });
+      const requestedQty = quantity;
       if (!asset.isConsumable && requestedQty !== 1) {
         return res.status(400).json({ error: "Individual devices can only be requested one at a time" });
       }
@@ -1727,7 +2413,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/assets/requests/:id/fulfill", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/assets/requests/:id/fulfill", authenticate, isInventoryManager, async (req, res, next) => {
     try {
       const requestId = req.params.id;
       const request = await prisma.assetRequest.findUnique({ 
@@ -1910,18 +2596,18 @@ async function startServer() {
   });
 
   // Update Asset (with restock notification)
-  app.put("/api/assets/:id", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/assets/:id", authenticate, isInventoryManager, async (req, res, next) => {
     try {
-      const { name, brand, type, typeId, serialNo, quantity, status, minStockLevel, isConsumable, assignedUserId, assignedDepartment } = req.body;
+      const { name, brand, type, typeId, serialNo, quantity, status, minStockLevel, isConsumable, assignedUserId, assignedDepartment } = parseBody(updateAssetSchema, req.body);
       const assetId = req.params.id;
 
       const oldAsset = await prisma.asset.findUnique({ where: { id: assetId } });
       if (!oldAsset) return res.status(404).json({ error: "Asset not found" });
 
-      const normalizedIsConsumable = Boolean(isConsumable);
-      const normalizedMinStockLevel = Math.max(0, parseInt(minStockLevel?.toString() || oldAsset.minStockLevel.toString() || "0"));
+      const normalizedIsConsumable = isConsumable ?? oldAsset.isConsumable;
+      const normalizedMinStockLevel = minStockLevel ?? oldAsset.minStockLevel;
       const normalizedQuantity = normalizedIsConsumable
-        ? Math.max(0, parseInt(quantity?.toString() || oldAsset.quantity.toString()))
+        ? quantity ?? oldAsset.quantity
         : 1;
 
       if (oldAsset.isConsumable !== normalizedIsConsumable) {
@@ -2012,7 +2698,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/assets/:id", authenticate, isStaff, async (req, res, next) => {
+  app.delete("/api/assets/:id", authenticate, isInventoryManager, async (req, res, next) => {
     try {
       const assetId = req.params.id;
       const asset = await prisma.asset.findUnique({ where: { id: assetId } });
@@ -2063,9 +2749,9 @@ async function startServer() {
   });
 
   // Delay reporting
-  app.put("/api/assets/maintenance/:id/delay", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/assets/maintenance/:id/delay", authenticate, isInventoryManager, async (req, res, next) => {
     try {
-      const { delayReason } = req.body;
+      const { delayReason } = parseBody(delaySchema, req.body);
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Maintenance record not found" });
 
@@ -2081,10 +2767,8 @@ async function startServer() {
 
   app.put(["/api/tickets/:id/sla-pause", "/api/tickets/:id/delay"], authenticate, isTechnician, async (req: any, res, next) => {
     try {
-      const blockingReason = String(req.body?.blockingReason || req.body?.delayReason || "").trim();
-      if (!blockingReason) {
-        return res.status(400).json({ error: "A blocking reason is required to pause the SLA." });
-      }
+      const pausePayload = parseBody(slaPauseSchema, req.body);
+      const blockingReason = pausePayload.blockingReason || pausePayload.delayReason || "";
 
       const exists = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Ticket not found" });
@@ -2273,9 +2957,21 @@ async function startServer() {
     }
   });
 
-  app.post("/api/maintenance", authenticate, isStaff, async (req, res, next) => {
+  app.post("/api/maintenance", authenticate, isInventoryManager, async (req, res, next) => {
     try {
-      const { title, description, startTime, endTime, type, technicianId, assetId } = req.body;
+      const { title, description, startTime, endTime, type, technicianId, assetId } = parseBody(maintenanceSchema, req.body);
+      if (technicianId) {
+        const tech = await prisma.profile.findUnique({ where: { id: technicianId } });
+        if (!tech || tech.role !== "technician") {
+          return res.status(400).json({ error: "Invalid technician ID" });
+        }
+
+        const activeWork = await getTechnicianActiveWork(technicianId);
+        if (activeWork) {
+          return res.status(400).json({ error: activeWork });
+        }
+      }
+
       const maintenance = await prisma.maintenance.create({ 
         data: { 
           title, 
@@ -2294,9 +2990,9 @@ async function startServer() {
     }
   });
 
-  app.put("/api/maintenance/:id/status", authenticate, isStaff, async (req, res, next) => {
+  app.put("/api/maintenance/:id/status", authenticate, isInventoryManager, async (req, res, next) => {
     try {
-      const { status } = req.body;
+      const { status } = parseBody(updateMaintenanceStatusSchema, req.body);
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Maintenance not found" });
       if (status === "completed" && !exists.technicianId) {
@@ -2331,9 +3027,21 @@ async function startServer() {
 
   app.put("/api/maintenance/:id/assign", authenticate, isManager, async (req, res, next) => {
     try {
-      const { technicianId } = req.body;
+      const { technicianId } = parseBody(maintenanceAssignSchema, req.body);
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Maintenance not found" });
+
+      if (technicianId) {
+        const tech = await prisma.profile.findUnique({ where: { id: technicianId } });
+        if (!tech || tech.role !== "technician") {
+          return res.status(400).json({ error: "Invalid technician ID" });
+        }
+
+        const activeWork = await getTechnicianActiveWork(technicianId, { excludeMaintenanceId: exists.id });
+        if (activeWork) {
+          return res.status(400).json({ error: activeWork });
+        }
+      }
 
       const maintenance = await prisma.maintenance.update({
         where: { id: req.params.id },
@@ -2395,16 +3103,16 @@ async function startServer() {
     }
   });
 
-  app.post("/api/maintenance/:id/parts", authenticate, isStaff, async (req: any, res, next) => {
+  app.post("/api/maintenance/:id/parts", authenticate, isInventoryManager, async (req: any, res, next) => {
     try {
-      const { assetId, quantity, notes } = req.body;
+      const { assetId, quantity, notes } = parseBody(maintenancePartSchema, req.body);
       const maintenance = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
       if (!maintenance) return res.status(404).json({ error: "Maintenance not found" });
 
       const asset = await prisma.asset.findUnique({ where: { id: assetId } });
       if (!asset) return res.status(404).json({ error: "Asset not found" });
 
-      const normalizedQuantity = Math.max(1, parseInt(quantity?.toString() || "1"));
+      const normalizedQuantity = quantity;
       if (asset.isConsumable && asset.quantity < normalizedQuantity) {
         return res.status(400).json({ error: "Insufficient stock for this part" });
       }
@@ -2458,13 +3166,14 @@ async function startServer() {
 
   app.post("/api/approvals", authenticate, isStaff, async (req: any, res, next) => {
     try {
+      const payload = parseBody(approvalRequestSchema, req.body);
       const approval = await ensureApprovalRequest({
-        type: req.body.type,
+        type: payload.type,
         requestedById: req.user.id,
-        reason: req.body.reason,
-        ticketId: req.body.ticketId,
-        assetId: req.body.assetId,
-        maintenanceId: req.body.maintenanceId,
+        reason: payload.reason || undefined,
+        ticketId: payload.ticketId,
+        assetId: payload.assetId,
+        maintenanceId: payload.maintenanceId,
       });
 
       const managers = await prisma.profile.findMany({
@@ -2483,10 +3192,7 @@ async function startServer() {
 
   app.put("/api/approvals/:id/respond", authenticate, isManager, async (req: any, res, next) => {
     try {
-      const { status } = req.body;
-      if (!["approved", "rejected"].includes(status)) {
-        return res.status(400).json({ error: "Status must be approved or rejected" });
-      }
+      const { status } = parseBody(approvalResponseSchema, req.body);
 
       const approval = await prisma.approvalRequest.update({
         where: { id: req.params.id },
@@ -2550,7 +3256,7 @@ async function startServer() {
   app.get("/api/users", authenticate, isAdmin, async (req, res, next) => {
     try {
       const users = await prisma.profile.findMany({
-        select: { id: true, name: true, email: true, role: true, status: true, department: true },
+        select: { id: true, name: true, email: true, role: true, status: true, canInviteStaff: true, department: true },
       });
       res.json(users);
     } catch (err) {
@@ -2559,15 +3265,9 @@ async function startServer() {
   });
 
   app.post("/api/users", authenticate, isAdmin, async (req, res, next) => {
-    const { name, email, password, role, department } = req.body;
     try {
-      const normalizedEmail = normalizeEmail(email || "");
-      if (!name || !normalizedEmail) {
-        return res.status(400).json({ error: "Name and email are required" });
-      }
-      if (!isValidPassword(password)) {
-        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.` });
-      }
+      const { name, email, password, role, department } = parseBody(createUserSchema, req.body);
+      const normalizedEmail = normalizeEmail(email);
 
       // Check if user already exists
       const existingUser = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
@@ -2592,15 +3292,12 @@ async function startServer() {
   });
 
   app.put("/api/users/:id", authenticate, isAdmin, async (req, res, next) => {
-    const { name, email, role, department } = req.body;
     try {
+      const { name, email, role, department } = parseBody(updateUserSchema, req.body);
       const exists = await prisma.profile.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "User not found" });
 
-      const normalizedEmail = normalizeEmail(email || "");
-      if (!name || !normalizedEmail) {
-        return res.status(400).json({ error: "Name and email are required" });
-      }
+      const normalizedEmail = normalizeEmail(email);
 
       const duplicate = await prisma.profile.findFirst({
         where: {
@@ -2618,6 +3315,7 @@ async function startServer() {
           name,
           email: normalizedEmail,
           role: role && allowedRoles.has(role) ? role : exists.role,
+          ...((role && role !== "manager") ? { canInviteStaff: false } : {}),
           department,
         },
       });
@@ -2635,17 +3333,17 @@ async function startServer() {
   });
 
   app.put("/api/users/:id/role", authenticate, isAdmin, async (req, res, next) => {
-    const { role } = req.body;
     try {
+      const { role } = parseBody(updateUserRoleSchema, req.body);
       const exists = await prisma.profile.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "User not found" });
-      if (!allowedRoles.has(role)) {
-        return res.status(400).json({ error: "Invalid role" });
-      }
 
       const user = await prisma.profile.update({
         where: { id: req.params.id },
-        data: { role },
+        data: {
+          role,
+          ...(role !== "manager" ? { canInviteStaff: false } : {}),
+        },
       });
       await writeAuditLog((req as any).user, "user.role_changed", {
         targetUserId: req.params.id,
@@ -2657,14 +3355,36 @@ async function startServer() {
     }
   });
 
-  app.put("/api/users/:id/password", authenticate, isAdmin, async (req, res, next) => {
-    const { password } = req.body;
+  app.put("/api/users/:id/manager-user-permission", authenticate, isAdmin, async (req, res, next) => {
     try {
+      const { canInviteStaff } = parseBody(updateManagerUserPermissionSchema, req.body);
       const exists = await prisma.profile.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "User not found" });
-      if (!isValidPassword(password)) {
-        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LENGTH} characters.` });
+      if (exists.role !== "manager") {
+        return res.status(400).json({ error: "Only managers can receive permission to invite staff." });
       }
+
+      const user = await prisma.profile.update({
+        where: { id: req.params.id },
+        data: { canInviteStaff },
+      });
+
+      await writeAuditLog((req as any).user, "user.manager_staff_invite_permission_changed", {
+        targetUserId: req.params.id,
+        canInviteStaff,
+      });
+
+      res.json(user);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.put("/api/users/:id/password", authenticate, isAdmin, async (req, res, next) => {
+    try {
+      const { password } = parseBody(updateUserPasswordSchema, req.body);
+      const exists = await prisma.profile.findUnique({ where: { id: req.params.id } });
+      if (!exists) return res.status(404).json({ error: "User not found" });
 
       await prisma.profile.update({
         where: { id: req.params.id },
@@ -2694,8 +3414,8 @@ async function startServer() {
       if (!exists) return res.status(404).json({ error: "User not found" });
 
       const [assignedOpenTickets, requestedOpenTickets, activeMaintenance] = await Promise.all([
-        prisma.ticket.count({ where: { assignedTo: id, status: { notIn: ["closed", "resolved"] } } }),
-        prisma.ticket.count({ where: { userId: id, status: { notIn: ["closed", "resolved"] } } }),
+        prisma.ticket.count({ where: { assignedTo: id, status: { notIn: ["pending-confirmation", "closed", "resolved"] } } }),
+        prisma.ticket.count({ where: { userId: id, status: { notIn: ["pending-confirmation", "closed", "resolved"] } } }),
         prisma.maintenance.count({ where: { technicianId: id, status: { not: "completed" } } }),
       ]);
 
@@ -2714,7 +3434,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/technicians", authenticate, async (req, res, next) => {
+  app.get("/api/technicians", authenticate, isTechnician, async (req, res, next) => {
     try {
       const techs = await prisma.profile.findMany({
         where: { role: "technician" },
@@ -2732,10 +3452,15 @@ async function startServer() {
       const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-      const isStaff = ["manager", "technician", "staff"].includes(req.user.role);
       const isOwner = ticket.userId === req.user.id;
+      const isAssigned = ticket.assignedTo === req.user.id;
+      const isPrivileged = isManagerRole(req.user.role);
 
-      if (!isStaff && !isOwner) {
+      if (req.user.role === "technician" && !isAssigned) {
+        return res.status(403).json({ error: "Technicians can only view comments for assigned tickets" });
+      }
+
+      if (!isPrivileged && !isAssigned && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2759,14 +3484,15 @@ async function startServer() {
       const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-      const isStaff = ["manager", "technician", "staff"].includes(req.user.role);
       const isOwner = ticket.userId === req.user.id;
+      const isAssigned = ticket.assignedTo === req.user.id;
+      const isPrivileged = isManagerRole(req.user.role);
 
-      if (req.user.role === "technician" && ticket.assignedTo !== req.user.id) {
+      if (req.user.role === "technician" && !isAssigned) {
         return res.status(403).json({ error: "Technicians can only view history for assigned tickets" });
       }
 
-      if (!isStaff && !isOwner) {
+      if (!isPrivileged && !isAssigned && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2783,19 +3509,20 @@ async function startServer() {
 
   app.post("/api/tickets/:id/comments", authenticate, async (req: any, res, next) => {
     try {
-      const { message, attachments, isInternal } = req.body;
+      const { message, attachments, isInternal } = parseBody(commentSchema, req.body);
 
       const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-      const isStaff = ["manager", "technician", "staff"].includes(req.user.role);
       const isOwner = ticket.userId === req.user.id;
+      const isAssigned = ticket.assignedTo === req.user.id;
+      const isPrivileged = isManagerRole(req.user.role);
 
-      if (req.user.role === "technician" && ticket.assignedTo !== req.user.id) {
+      if (req.user.role === "technician" && !isAssigned) {
         return res.status(403).json({ error: "Technicians can only comment on assigned tickets" });
       }
 
-      if (!isStaff && !isOwner) {
+      if (!isPrivileged && !isAssigned && !isOwner) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2841,6 +3568,7 @@ async function startServer() {
       const completedStatuses = ["resolved", "closed"];
       const resolved = await prisma.ticket.count({ where: { ...where, status: "resolved" } });
       const closed = await prisma.ticket.count({ where: { ...where, status: "closed" } });
+      const pendingConfirmation = await prisma.ticket.count({ where: { ...where, status: "pending-confirmation" } });
       const completed = resolved + closed;
       const pending = await prisma.ticket.count({ where: { ...where, status: "in-progress" } });
       
@@ -2948,6 +3676,7 @@ async function startServer() {
         open, 
         resolved, 
         closed,
+        pendingConfirmation,
         completed,
         pending, 
         byCategory, 
@@ -2979,13 +3708,10 @@ async function startServer() {
   });
 
   app.put("/api/users/:id/status", authenticate, isAdmin, async (req, res, next) => {
-    const { status } = req.body;
     try {
+      const { status } = parseBody(updateUserStatusSchema, req.body);
       const exists = await prisma.profile.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "User not found" });
-      if (!["pending", "active", "disabled"].includes(status)) {
-        return res.status(400).json({ error: "Invalid status" });
-      }
 
       const user = await prisma.profile.update({
         where: { id: req.params.id },
@@ -3097,6 +3823,7 @@ async function startServer() {
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    startTelegramLinkPolling();
   });
 }
 

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import dynamic from 'next/dynamic';
 import { useParams, useNavigate } from '../lib/router';
 import { 
   ArrowLeft, 
@@ -23,7 +24,8 @@ import {
   Star,
   Clock,
   Package,
-  CheckCircle2
+  CheckCircle2,
+  MapPin
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { formatDistanceToNow } from 'date-fns';
@@ -33,6 +35,15 @@ import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import { isManager } from '../lib/permissions';
+
+const TicketLocationMap = dynamic(() => import('../components/TicketLocationMap'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-[260px] items-center justify-center bg-slate-100 text-sm font-bold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+      Loading map...
+    </div>
+  ),
+});
 
 export default function TicketDetail({ user }: { user: any }) {
   const { t } = useTranslation();
@@ -58,6 +69,8 @@ export default function TicketDetail({ user }: { user: any }) {
   const [rating, setRating] = useState<number | null>(null);
   const [feedbackComment, setFeedbackComment] = useState('');
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [appealReason, setAppealReason] = useState('');
+  const [appealSubmitted, setAppealSubmitted] = useState(false);
   const [blockDialogOpen, setBlockDialogOpen] = useState(false);
   const [blockingReasonInput, setBlockingReasonInput] = useState('');
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -74,6 +87,20 @@ export default function TicketDetail({ user }: { user: any }) {
   const openConfirm = (title: string, message: string, onConfirm: () => void, color: 'primary' | 'danger' | 'success' = 'primary') => {
     setConfirmConfig({ title, message, onConfirm, color });
     setConfirmOpen(true);
+  };
+
+  const statusRank: Record<string, number> = {
+    open: 0,
+    'in-progress': 1,
+    'pending-confirmation': 2,
+    resolved: 3,
+    closed: 4,
+  };
+
+  const canMoveToStatus = (nextStatus: string) => {
+    const currentRank = statusRank[ticket?.status];
+    const nextRank = statusRank[nextStatus];
+    return currentRank !== undefined && nextRank !== undefined && nextRank >= currentRank;
   };
 
   const getAgeColor = (date: string) => {
@@ -153,9 +180,9 @@ export default function TicketDetail({ user }: { user: any }) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status }),
         });
-        await handleResponse(res);
-        setTicket({ ...ticket, status });
-        toast.success(`Ticket status updated to ${status}`);
+        const updatedTicket = await handleResponse(res);
+        setTicket({ ...ticket, ...updatedTicket });
+        toast.success(`Ticket status updated to ${updatedTicket.status || status}`);
         // Refresh history
         fetch(`/api/tickets/${id}/history`).then(r => r.json()).then(setHistory);
       } catch (err: any) {
@@ -375,6 +402,11 @@ export default function TicketDetail({ user }: { user: any }) {
   };
 
   const handleStaffReview = async (approved: boolean) => {
+    if (!approved) {
+      toast.error('Resolved tickets cannot be reopened. Closed tickets can be appealed.');
+      return;
+    }
+
     setPendingAction(approved ? 'staff-approve' : 'staff-reopen');
     try {
       const res = await fetch(`/api/tickets/${id}/staff-review`, {
@@ -388,6 +420,27 @@ export default function TicketDetail({ user }: { user: any }) {
       fetch(`/api/tickets/${id}/history`).then(r => r.json()).then(setHistory);
     } catch (err: any) {
       toast.error(err.message || 'Failed to review ticket');
+    } finally {
+      setPendingAction(null);
+    }
+  };
+
+  const handleAppealSubmit = async () => {
+    if (!appealReason.trim()) return;
+    setPendingAction('appeal');
+    try {
+      const res = await fetch(`/api/tickets/${id}/appeal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: appealReason }),
+      });
+      await handleResponse(res);
+      setAppealSubmitted(true);
+      setAppealReason('');
+      fetch(`/api/tickets/${id}/history`).then(r => r.json()).then(setHistory);
+      toast.success('Appeal submitted for review');
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to submit appeal');
     } finally {
       setPendingAction(null);
     }
@@ -453,6 +506,10 @@ export default function TicketDetail({ user }: { user: any }) {
     );
   }
 
+  const locationLatitude = typeof ticket.locationLatitude === 'number' ? ticket.locationLatitude : null;
+  const locationLongitude = typeof ticket.locationLongitude === 'number' ? ticket.locationLongitude : null;
+  const hasLocation = locationLatitude !== null && locationLongitude !== null;
+
   return (
     <div className="pb-20">
       <button 
@@ -463,20 +520,21 @@ export default function TicketDetail({ user }: { user: any }) {
         {t('Back to Dashboard')}
       </button>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:gap-8">
         {/* Main Ticket Info */}
         <div className="lg:col-span-8 space-y-8">
-          <div className="bg-white dark:bg-slate-900 p-8 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm">
+          <div className="surface p-6 sm:p-8">
             <div className="flex flex-col md:flex-row md:items-start justify-between gap-4 mb-6">
               <div>
-                <h1 className="text-3xl font-black text-slate-900 dark:text-white tracking-tight leading-tight mb-2">
+                <h1 className="page-title mb-2 leading-tight">
                   {ticket.title}
                 </h1>
                 <div className="flex flex-wrap items-center gap-3">
                   <span className={cn(
-                    "px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border",
+                    "badge border",
                     ticket.status === 'open' ? "bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 border-blue-100 dark:border-blue-800" :
                     ticket.status === 'in-progress' ? "bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-100 dark:border-amber-800" :
+                    ticket.status === 'pending-confirmation' ? "bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600 dark:text-indigo-400 border-indigo-100 dark:border-indigo-800" :
                     ticket.status === 'resolved' ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-100 dark:border-emerald-800" :
                     "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-700"
                   )}>
@@ -535,7 +593,7 @@ export default function TicketDetail({ user }: { user: any }) {
               </div>
             )}
             
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mb-8">
+            <div className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-slate-50 dark:bg-slate-800 rounded-xl text-slate-400">
                   <User size={18} />
@@ -567,12 +625,36 @@ export default function TicketDetail({ user }: { user: any }) {
 
             <div className="space-y-4 mb-8">
               <h3 className="text-xs font-black text-slate-400 uppercase tracking-wider">{t('Description')}</h3>
-              <div className="p-6 bg-slate-50 dark:bg-slate-800/50 rounded-2xl">
+              <div className="rounded-xl bg-slate-50 p-5 dark:bg-slate-800/50">
                 <p className="text-slate-700 dark:text-slate-300 whitespace-pre-wrap leading-relaxed font-medium">
                   {ticket.description}
                 </p>
               </div>
             </div>
+
+            {hasLocation && (
+              <div className="mb-8 space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-xs font-black text-slate-400 uppercase tracking-wider">{t('User Location')}</h3>
+                  <a
+                    href={`https://www.openstreetmap.org/?mlat=${locationLatitude}&mlon=${locationLongitude}#map=17/${locationLatitude}/${locationLongitude}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs font-black text-blue-600 hover:text-blue-700"
+                  >
+                    {t('Open in OpenStreetMap')}
+                  </a>
+                </div>
+                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-100 dark:border-slate-800 dark:bg-slate-800">
+                  <TicketLocationMap
+                    latitude={locationLatitude}
+                    longitude={locationLongitude}
+                    accuracy={ticket.locationAccuracy}
+                    label={ticket.title}
+                  />
+                </div>
+              </div>
+            )}
 
             {ticket.attachments && ticket.attachments.length > 0 && (
               <div className="space-y-4 mb-8">
@@ -595,7 +677,7 @@ export default function TicketDetail({ user }: { user: any }) {
 
             {/* Admin/Tech/Manager Controls */}
             {(user?.role === 'technician' || isManagerLevel) && (
-              <div className="p-6 bg-slate-50 dark:bg-slate-800/50 rounded-3xl border border-slate-100 dark:border-slate-700">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-slate-800 dark:bg-slate-800/50">
                 <h3 className="text-xs font-black text-slate-400 uppercase tracking-wider mb-4">{t('Management Actions')}</h3>
                 
                 <div className="flex flex-wrap gap-3 mb-6">
@@ -603,7 +685,7 @@ export default function TicketDetail({ user }: { user: any }) {
                     <>
                       <button 
                         onClick={() => handleUpdateStatus('in-progress')}
-                        disabled={pendingAction !== null || ticket.status === 'in-progress' || ticket.slaPaused}
+                        disabled={pendingAction !== null || !canMoveToStatus('in-progress') || ticket.status === 'in-progress' || ticket.slaPaused}
                         className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-sm font-bold transition-all shadow-lg shadow-blue-600/20 disabled:shadow-none"
                       >
                         {pendingAction === 'in-progress' ? t('Starting...') : t('Start Work')}
@@ -629,7 +711,7 @@ export default function TicketDetail({ user }: { user: any }) {
                       )}
                       <button 
                         onClick={() => handleUpdateStatus('resolved')}
-                        disabled={pendingAction !== null || ticket.status === 'resolved' || ticket.slaPaused}
+                        disabled={pendingAction !== null || !canMoveToStatus('resolved') || ['pending-confirmation', 'resolved'].includes(ticket.status) || ticket.slaPaused}
                         className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-sm font-bold transition-all shadow-lg shadow-emerald-600/20 disabled:shadow-none"
                       >
                         {pendingAction === 'resolved' ? t('Completing...') : t('Mark Resolved')}
@@ -666,7 +748,7 @@ export default function TicketDetail({ user }: { user: any }) {
                     <>
                       <button 
                         onClick={() => handleUpdateStatus('closed')}
-                        disabled={pendingAction !== null || ticket.status === 'closed'}
+                        disabled={pendingAction !== null || !canMoveToStatus('closed') || ticket.status === 'closed'}
                         className="px-4 py-2 bg-slate-200 hover:bg-slate-300 disabled:bg-slate-100 disabled:text-slate-400 text-slate-700 rounded-xl text-sm font-bold transition-all"
                       >
                         {pendingAction === 'closed' ? t('Saving...') : t('Close Ticket')}
@@ -747,7 +829,7 @@ export default function TicketDetail({ user }: { user: any }) {
               <h2 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">{t('Communication History')}</h2>
             </div>
             
-            <div className="bg-white dark:bg-slate-900 p-8 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm">
+            <div className="surface p-6 sm:p-8">
               <div className="space-y-8 mb-10">
                 {Array.isArray(comments) && comments.map((comment) => (
                   <div key={comment.id} className="flex gap-4">
@@ -828,7 +910,7 @@ export default function TicketDetail({ user }: { user: any }) {
                   <input
                     type="text"
                     placeholder={t("Add a comment or update...")}
-                    className="flex-grow px-6 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-100 dark:border-slate-700 rounded-2xl text-sm font-medium focus:ring-2 focus:ring-blue-500 transition-all outline-none"
+                    className="field flex-grow"
                     value={newComment}
                     onChange={(e) => setNewComment(e.target.value)}
                   />
@@ -838,7 +920,7 @@ export default function TicketDetail({ user }: { user: any }) {
                   </label>
                   <button 
                     type="submit"
-                    className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl text-sm font-black transition-all shadow-lg shadow-blue-600/20"
+                    className="btn-primary"
                   >
                     <Send size={18} />
                     {t('Send')}
@@ -849,7 +931,7 @@ export default function TicketDetail({ user }: { user: any }) {
           </div>
 
           {/* Ticket History Section */}
-          <div className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm overflow-hidden">
+          <div className="surface overflow-hidden">
             <details className="group">
               <summary className="flex items-center justify-between p-6 cursor-pointer list-none">
                 <div className="flex items-center gap-3">
@@ -895,11 +977,11 @@ export default function TicketDetail({ user }: { user: any }) {
           </div>
 
           {/* Staff Review */}
-          {ticket.status === 'resolved' && user?.role === 'staff' && (
+          {(ticket.status === 'pending-confirmation' || (ticket.status === 'resolved' && !ticket.isApproved)) && user?.role === 'staff' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className="bg-blue-50 dark:bg-blue-900/20 p-8 rounded-3xl border border-blue-100 dark:border-blue-800"
+              className="rounded-2xl border border-blue-100 bg-blue-50 p-6 dark:border-blue-800 dark:bg-blue-900/20"
             >
               <div className="flex items-center gap-3 mb-4">
                 <div className="p-2 bg-blue-600 rounded-xl text-white">
@@ -908,24 +990,55 @@ export default function TicketDetail({ user }: { user: any }) {
                 <h2 className="text-2xl font-black text-blue-900 dark:text-blue-200 tracking-tight">{t('Is your issue solved?')}</h2>
               </div>
               <p className="text-blue-700 dark:text-blue-300 font-medium mb-8">
-                {t('Confirm whether the technician solved your issue or reopen the ticket if you still need help.')}
+                {t('Confirm whether the technician solved your issue. Resolved tickets cannot be reopened after this step.')}
               </p>
               <div className="flex flex-col sm:flex-row gap-3">
                 <button
                   onClick={() => handleStaffReview(true)}
                   disabled={pendingAction !== null}
-                  className="flex-1 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-2xl text-sm font-black transition-all shadow-lg shadow-emerald-600/20 disabled:shadow-none"
+                  className="btn bg-emerald-600 text-white shadow-sm shadow-emerald-600/20 hover:bg-emerald-700 disabled:bg-slate-300 disabled:shadow-none"
                 >
                   {pendingAction === 'staff-approve' ? t('Saving...') : t('Issue Solved')}
                 </button>
-                <button
-                  onClick={() => handleStaffReview(false)}
-                  disabled={pendingAction !== null}
-                  className="flex-1 px-6 py-3 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white rounded-2xl text-sm font-black transition-all shadow-lg shadow-rose-600/20 disabled:shadow-none"
-                >
-                  {pendingAction === 'staff-reopen' ? t('Saving...') : t('Not Solved')}
-                </button>
               </div>
+            </motion.div>
+          )}
+
+          {/* Closed Ticket Appeal */}
+          {ticket.status === 'closed' && user?.role === 'staff' && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="rounded-2xl border border-amber-100 bg-amber-50 p-6 dark:border-amber-800 dark:bg-amber-900/20"
+            >
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 bg-amber-600 rounded-xl text-white">
+                  <AlertTriangle size={24} />
+                </div>
+                <h2 className="text-2xl font-black text-amber-900 dark:text-amber-200 tracking-tight">{t('Appeal Closed Ticket')}</h2>
+              </div>
+              <p className="text-amber-700 dark:text-amber-300 font-medium mb-6">
+                {t('Closed tickets cannot be reopened directly. Submit an appeal if this issue still needs attention.')}
+              </p>
+              {appealSubmitted ? (
+                <p className="text-sm font-black text-amber-800 dark:text-amber-200">{t('Your appeal has been submitted for review.')}</p>
+              ) : (
+                <div className="space-y-4">
+                  <textarea
+                    className="field min-h-[110px]"
+                    placeholder={t('Explain why this closed ticket should be reviewed again...')}
+                    value={appealReason}
+                    onChange={(e) => setAppealReason(e.target.value)}
+                  />
+                  <button
+                    onClick={handleAppealSubmit}
+                    disabled={pendingAction !== null || !appealReason.trim()}
+                    className="btn bg-amber-600 text-white shadow-sm shadow-amber-600/20 hover:bg-amber-700 disabled:bg-slate-300 disabled:shadow-none"
+                  >
+                    {pendingAction === 'appeal' ? t('Submitting...') : t('Submit Appeal')}
+                  </button>
+                </div>
+              )}
             </motion.div>
           )}
 
@@ -934,7 +1047,7 @@ export default function TicketDetail({ user }: { user: any }) {
             <motion.div 
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              className="bg-emerald-50 dark:bg-emerald-900/20 p-8 rounded-3xl border border-emerald-100 dark:border-emerald-800"
+              className="rounded-2xl border border-emerald-100 bg-emerald-50 p-6 dark:border-emerald-800 dark:bg-emerald-900/20"
             >
               <div className="flex items-center gap-3 mb-4">
                 <div className="p-2 bg-emerald-600 rounded-xl text-white">
@@ -968,7 +1081,7 @@ export default function TicketDetail({ user }: { user: any }) {
                 <div>
                   <h3 className="text-xs font-black text-emerald-800 dark:text-emerald-400 uppercase tracking-wider mb-3">{t('Comments')}</h3>
                   <textarea
-                    className="w-full px-6 py-4 bg-white dark:bg-slate-900 border border-emerald-100 dark:border-emerald-800 rounded-2xl text-sm font-medium focus:ring-2 focus:ring-emerald-500 transition-all outline-none min-h-[100px]"
+                    className="field min-h-[100px]"
                     placeholder={t("Any additional comments? (Optional)")}
                     value={feedbackComment}
                     onChange={(e) => setFeedbackComment(e.target.value)}
@@ -978,7 +1091,7 @@ export default function TicketDetail({ user }: { user: any }) {
                 <button 
                   onClick={handleFeedbackSubmit}
                   disabled={!rating}
-                  className="px-8 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-2xl text-sm font-black transition-all shadow-lg shadow-emerald-600/20 disabled:shadow-none"
+                  className="btn bg-emerald-600 text-white shadow-sm shadow-emerald-600/20 hover:bg-emerald-700 disabled:bg-slate-300 disabled:shadow-none"
                 >
                   {t('Submit Feedback')}
                 </button>
@@ -996,7 +1109,7 @@ export default function TicketDetail({ user }: { user: any }) {
 
         {/* Sidebar Info */}
         <div className="lg:col-span-4 space-y-8">
-          <div className="bg-white dark:bg-slate-900 p-8 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm">
+          <div className="surface p-6 sm:p-8">
             <h2 className="text-xl font-black text-slate-900 dark:text-white tracking-tight mb-6">{t('Ticket Details')}</h2>
             <div className="space-y-6">
               <div className="flex items-center gap-4">
@@ -1015,6 +1128,19 @@ export default function TicketDetail({ user }: { user: any }) {
                 <div>
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{t('Last Updated')}</p>
                   <p className="text-sm font-bold text-slate-700 dark:text-slate-200">{safeDate(ticket.updatedAt).toLocaleString()}</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="p-2 bg-slate-50 dark:bg-slate-800 rounded-xl text-slate-400">
+                  <MapPin size={18} />
+                </div>
+                <div>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{t('User Location')}</p>
+                  <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
+                    {hasLocation
+                      ? `${locationLatitude.toFixed(5)}, ${locationLongitude.toFixed(5)}`
+                      : t('Not provided')}
+                  </p>
                 </div>
               </div>
               <div className="flex items-center gap-4">
@@ -1044,7 +1170,7 @@ export default function TicketDetail({ user }: { user: any }) {
 
           {/* Parts & Assets Usage Section */}
           {(user?.role === 'technician' || isManagerLevel) && (
-            <div className="bg-white dark:bg-slate-900 p-8 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm">
+            <div className="surface p-6 sm:p-8">
               <h2 className="text-xl font-black text-slate-900 dark:text-white tracking-tight mb-6">{t('Parts & Assets Used')}</h2>
               
               {/* Record New Usage */}

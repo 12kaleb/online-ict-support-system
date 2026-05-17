@@ -1,8 +1,23 @@
 'use client';
 
+import { Eye, EyeOff } from 'lucide-react';
 import { FormEvent, useMemo, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+
+const PASSWORD_MIN_LENGTH = 8;
+
+function getPasswordError(password: string) {
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    return `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`;
+  }
+
+  if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    return 'Password must include both letters and numbers.';
+  }
+
+  return '';
+}
 
 export default function SetupPasswordPage() {
   const searchParams = useSearchParams();
@@ -12,6 +27,10 @@ export default function SetupPasswordPage() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const passwordError = getPasswordError(password);
+  const passwordsMatch = confirmPassword.length === 0 || password === confirmPassword;
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -23,8 +42,8 @@ export default function SetupPasswordPage() {
       return;
     }
 
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters.');
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
 
@@ -62,7 +81,7 @@ export default function SetupPasswordPage() {
         <p className="mb-3 text-xs font-bold uppercase tracking-[0.35em] text-cyan-700">Invitation</p>
         <h1 className="text-3xl font-black tracking-tight">Set your password</h1>
         <p className="mt-3 text-sm leading-6 text-slate-600">
-          Finish your account setup with a secure password, then head back to the sign-in screen.
+          Finish your account setup with a secure password. This invitation link expires after 24 hours.
         </p>
 
         <form onSubmit={handleSubmit} className="mt-8 space-y-4">
@@ -70,28 +89,56 @@ export default function SetupPasswordPage() {
             <label className="mb-2 block text-xs font-bold uppercase tracking-[0.25em] text-slate-500">
               New password
             </label>
-            <input
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none transition focus:border-cyan-500 focus:bg-white"
-              placeholder="Minimum 6 characters"
-              required
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 pr-12 outline-none transition focus:border-cyan-500 focus:bg-white"
+                placeholder="At least 8 characters"
+                autoComplete="new-password"
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((visible) => !visible)}
+                className="absolute right-3 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-800"
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+              >
+                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
+            <p className="mt-2 text-xs font-medium text-slate-500">
+              Use at least 8 characters with letters and numbers.
+            </p>
           </div>
 
           <div>
             <label className="mb-2 block text-xs font-bold uppercase tracking-[0.25em] text-slate-500">
               Confirm password
             </label>
-            <input
-              type="password"
-              value={confirmPassword}
-              onChange={(event) => setConfirmPassword(event.target.value)}
-              className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none transition focus:border-cyan-500 focus:bg-white"
-              placeholder="Repeat password"
-              required
-            />
+            <div className="relative">
+              <input
+                type={showConfirmPassword ? 'text' : 'password'}
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 pr-12 outline-none transition focus:border-cyan-500 focus:bg-white"
+                placeholder="Repeat password"
+                autoComplete="new-password"
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword((visible) => !visible)}
+                className="absolute right-3 top-1/2 inline-flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-800"
+                aria-label={showConfirmPassword ? 'Hide confirmation password' : 'Show confirmation password'}
+              >
+                {showConfirmPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
+            {!passwordsMatch ? (
+              <p className="mt-2 text-xs font-bold text-rose-600">Passwords do not match.</p>
+            ) : null}
           </div>
 
           {error ? (
@@ -108,7 +155,7 @@ export default function SetupPasswordPage() {
 
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || Boolean(passwordError) || !passwordsMatch}
             className="w-full rounded-2xl bg-cyan-600 px-4 py-3 text-sm font-black uppercase tracking-[0.25em] text-white transition hover:bg-cyan-700 disabled:cursor-not-allowed disabled:opacity-70"
           >
             {submitting ? 'Saving...' : 'Save Password'}

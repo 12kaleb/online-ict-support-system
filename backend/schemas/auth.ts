@@ -1,11 +1,17 @@
 import { z } from "zod";
 
-const PASSWORD_MIN_LENGTH = 6;
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_STRENGTH_MESSAGE = "Password must be at least 8 characters and include both letters and numbers.";
+const passwordSchema = z
+  .string()
+  .min(PASSWORD_MIN_LENGTH, PASSWORD_STRENGTH_MESSAGE)
+  .regex(/[A-Za-z]/, PASSWORD_STRENGTH_MESSAGE)
+  .regex(/[0-9]/, PASSWORD_STRENGTH_MESSAGE);
 
 export const registerSchema = z.object({
   name: z.string().trim().min(1, "Name is required."),
   email: z.email("A valid email address is required."),
-  password: z.string().min(PASSWORD_MIN_LENGTH, `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`),
+  password: passwordSchema,
   department: z.string().trim().min(1, "Department is required."),
 });
 
@@ -18,13 +24,13 @@ export const loginSchema = z.object({
 export const inviteUserSchema = z.object({
   name: z.string().trim().min(1, "Name is required."),
   email: z.email("A valid email address is required."),
-  role: z.enum(["manager", "technician"]),
+  role: z.enum(["staff", "manager", "technician"]),
   department: z.string().trim().min(1, "Department is required."),
 });
 
 export const setupPasswordSchema = z.object({
   token: z.string().trim().min(1, "Invite token is required."),
-  password: z.string().min(PASSWORD_MIN_LENGTH, `Password must be at least ${PASSWORD_MIN_LENGTH} characters.`),
+  password: passwordSchema,
 });
 
 export const allowedEmailSchema = z.object({

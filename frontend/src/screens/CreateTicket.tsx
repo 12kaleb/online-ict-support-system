@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useNavigate } from '../lib/router';
-import { ArrowLeft, Paperclip, X, Loader2 } from 'lucide-react';
+import { ArrowLeft, Crosshair, Loader2, MapPin, Paperclip, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { handleResponse } from '../utils/apiUtils';
@@ -18,6 +18,12 @@ const TEMPLATES = [
   { key: 'software', label: 'Software Issue', category: 'Software', priority: 'medium', title: 'Software or application issue', description: 'Describe the application, steps taken, and any exact error shown.' },
 ];
 
+type TicketLocation = {
+  latitude: number;
+  longitude: number;
+  accuracy?: number;
+};
+
 export default function CreateTicket() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -29,6 +35,8 @@ export default function CreateTicket() {
   const [templateKey, setTemplateKey] = useState('');
   const [assets, setAssets] = useState<any[]>([]);
   const [attachments, setAttachments] = useState<any[]>([]);
+  const [location, setLocation] = useState<TicketLocation | null>(null);
+  const [locationLoading, setLocationLoading] = useState(false);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -58,6 +66,39 @@ export default function CreateTicket() {
     setAttachments(prev => prev.filter((_, i) => i !== index));
   };
 
+  const handleUseCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      toast.error('Geolocation is not supported by this browser');
+      return;
+    }
+
+    setLocationLoading(true);
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setLocation({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+        });
+        setLocationLoading(false);
+        toast.success('Location added to ticket');
+      },
+      (error) => {
+        const message =
+          error.code === error.PERMISSION_DENIED
+            ? 'Location permission was denied'
+            : 'Unable to get your current location';
+        toast.error(message);
+        setLocationLoading(false);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: 60000,
+      },
+    );
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -65,7 +106,7 @@ export default function CreateTicket() {
       const res = await fetch('/api/tickets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, description, category, priority, assetId, attachments, templateKey: templateKey || undefined }),
+        body: JSON.stringify({ title, description, category, priority, assetId, attachments, location: location || undefined, templateKey: templateKey || undefined }),
       });
       await handleResponse(res);
       toast.success('Ticket created successfully');
@@ -186,6 +227,49 @@ export default function CreateTicket() {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              <div className="md:col-span-2 space-y-3">
+                <label className="text-sm font-black text-slate-700 dark:text-slate-300 uppercase tracking-wider ml-1">{t('User Location')}</label>
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-800">
+                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-start gap-3">
+                      <div className="rounded-xl bg-white p-2 text-indigo-600 shadow-sm dark:bg-slate-900">
+                        <MapPin size={20} />
+                      </div>
+                      <div>
+                        <p className="text-sm font-black text-slate-800 dark:text-slate-100">
+                          {location ? t('Location attached') : t('Attach current location')}
+                        </p>
+                        <p className="mt-1 text-xs font-medium text-slate-500 dark:text-slate-400">
+                          {location
+                            ? `${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}${location.accuracy ? ` - ${Math.round(location.accuracy)}m accuracy` : ''}`
+                            : t('Use browser geolocation so support staff can find the affected area.')}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      {location && (
+                        <button
+                          type="button"
+                          onClick={() => setLocation(null)}
+                          className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-black text-slate-600 transition-all hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                        >
+                          {t('Remove')}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleUseCurrentLocation}
+                        disabled={locationLoading}
+                        className="flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-black text-white shadow-lg shadow-indigo-600/20 transition-all hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {locationLoading ? <Loader2 size={16} className="animate-spin" /> : <Crosshair size={16} />}
+                        {locationLoading ? t('Locating...') : t(location ? 'Update Location' : 'Use My Location')}
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <div className="md:col-span-2 space-y-2">

@@ -30,7 +30,11 @@ model Profile {
   passwordHash  String?
   role          UserRole       @default(staff)
   status        UserStatus     @default(active)
+  canInviteStaff Boolean       @default(false)
   department    String?
+  telegramChatId String?       @unique
+  telegramLinkCode String?     @unique
+  telegramLinkCodeExpiresAt DateTime?
   createdAt     DateTime       @default(now())
   tickets       Ticket[]       @relation("UserTickets")
   assigned      Ticket[]       @relation("AssignedTickets")
@@ -77,6 +81,9 @@ model Ticket {
   technician  Profile?     @relation("AssignedTickets", fields: [assignedTo], references: [id], onDelete: SetNull)
   assetId     String?
   asset       Asset?       @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  locationLatitude Float?
+  locationLongitude Float?
+  locationAccuracy Float?
   dueDate     DateTime?
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt

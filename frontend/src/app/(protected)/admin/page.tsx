@@ -2,11 +2,11 @@
 
 import Admin from '@/screens/Admin';
 import { GuardedRoute } from '@/components/RouteGuards';
-import { isAdmin } from '@/lib/permissions';
+import { canInviteStaff } from '@/lib/permissions';
 
 export default function AdminPage() {
   return (
-    <GuardedRoute allow={isAdmin}>
+    <GuardedRoute allow={canInviteStaff}>
       {() => <Admin />}
     </GuardedRoute>
   );

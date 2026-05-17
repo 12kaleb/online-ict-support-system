@@ -45,10 +45,6 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode; user: a
       const newSocket = io(window.location.origin);
       setSocket(newSocket);
 
-      newSocket.on('connect', () => {
-        newSocket.emit('join', user.id);
-      });
-
       newSocket.on('notification', (notification: Notification) => {
         setNotifications(prev => [notification, ...prev]);
         toast.info(notification.title, {
@@ -64,6 +60,8 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode; user: a
         newSocket.disconnect();
       };
     }
+
+    return undefined;
   }, [user]);
 
   const markAsRead = async (id: string) => {

@@ -178,6 +178,8 @@ const resources = {
       'Not Solved': 'Not Solved',
       'Assigned To': 'Assigned To',
       'Resolved and Approved': 'Resolved and Approved',
+      'Pending Confirmation': 'Pending Confirmation',
+      'pending-confirmation': 'Pending Confirmation',
       'Confirm Action': 'Confirm Action',
       'Are you sure you want to delete this ticket?': 'Are you sure you want to delete this ticket?',
       'Are you sure you want to close this ticket?': 'Are you sure you want to close this ticket?',
