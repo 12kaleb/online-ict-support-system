@@ -15,7 +15,7 @@ import {
   LineChart,
   Line
 } from 'recharts';
-import { TrendingUp, CheckCircle, Clock, AlertTriangle, Archive } from 'lucide-react';
+import { TrendingUp, CheckCircle, Clock, AlertTriangle, Archive, MessageSquare, Star } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '../lib/utils';
 import { Link } from '@/lib/router';
@@ -47,6 +47,7 @@ export default function Reports() {
   const categoryData = stats?.byCategory?.map((c: any) => ({ name: c.category, value: c._count?.id || 0 })) || [];
   const priorityData = stats?.byPriority?.map((p: any) => ({ name: p.priority, value: p._count?.id || 0 })) || [];
   const statusData = stats?.byStatus?.map((s: any) => ({ name: s.status, value: s._count?.id || 0 })) || [];
+  const feedbackData = stats?.feedback?.distribution?.map((item: any) => ({ name: `${item.rating}★`, value: item.count })) || [];
   const getCompletedCount = (tech: any) => tech?.completed ?? ((tech?.resolved || 0) + (tech?.closed || 0));
   const getSuccessRate = (tech: any) => (tech?.total || 0) > 0 ? Math.round((getCompletedCount(tech) / (tech?.total || 0)) * 100) : 0;
 
@@ -136,6 +137,43 @@ export default function Reports() {
           <p className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">{t('Open Approvals')}</p>
           <p className="text-4xl font-black text-slate-900 dark:text-white">{stats?.openApprovals || 0}</p>
           <p className="mt-2 text-xs font-medium text-slate-500 dark:text-slate-400">{t('Pending management actions')}</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div className="lg:col-span-3 bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm">
+          <div className="flex items-center gap-4 mb-4">
+            <div className="p-3 bg-amber-50 dark:bg-amber-900/20 rounded-2xl text-amber-600">
+              <Star size={24} />
+            </div>
+            <p className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{t('Average Rating')}</p>
+          </div>
+          <p className="text-4xl font-black text-slate-900 dark:text-white">{stats?.feedback?.averageRating ?? '-'}</p>
+          <p className="mt-2 text-xs font-medium text-slate-500 dark:text-slate-400">{stats?.feedback?.total || 0} {t('feedback responses')}</p>
+        </div>
+        <div className="lg:col-span-3 bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm">
+          <div className="flex items-center gap-4 mb-4">
+            <div className="p-3 bg-rose-50 dark:bg-rose-900/20 rounded-2xl text-rose-600">
+              <AlertTriangle size={24} />
+            </div>
+            <p className="text-sm font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">{t('Low Ratings')}</p>
+          </div>
+          <p className="text-4xl font-black text-slate-900 dark:text-white">{stats?.feedback?.lowCount || 0}</p>
+          <p className="mt-2 text-xs font-medium text-slate-500 dark:text-slate-400">{t('Ratings of 1 or 2 stars')}</p>
+        </div>
+        <div className="lg:col-span-6 bg-white dark:bg-slate-900 p-6 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm h-[260px]">
+          <h3 className="text-lg font-black text-slate-900 dark:text-white mb-4">{t('Feedback Distribution')}</h3>
+          <div className="h-[180px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={feedbackData}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 12, fontWeight: 600 }} />
+                <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={{ fill: '#94a3b8', fontSize: 12, fontWeight: 600 }} />
+                <Tooltip contentStyle={{ backgroundColor: '#1e293b', border: 'none', borderRadius: '12px', color: '#fff' }} />
+                <Bar dataKey="value" fill="#f59e0b" radius={[6, 6, 0, 0]} barSize={32} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
         </div>
       </div>
 
@@ -271,6 +309,46 @@ export default function Reports() {
         </div>
 
         {/* Technician Performance Table */}
+        {stats?.feedback?.recent && (
+          <div className="lg:col-span-12 bg-white dark:bg-slate-900 p-8 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm">
+            <div className="mb-6 flex items-center gap-3">
+              <MessageSquare className="text-blue-600" size={22} />
+              <h3 className="text-xl font-black text-slate-900 dark:text-white">{t('Recent Feedback')}</h3>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {stats.feedback.recent.length === 0 ? (
+                <div className="lg:col-span-2 rounded-2xl bg-slate-50 p-6 text-center text-sm font-bold text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                  {t('No feedback submitted yet.')}
+                </div>
+              ) : (
+                stats.feedback.recent.map((feedback: any) => (
+                  <Link
+                    key={feedback.id}
+                    to={`/tickets/${feedback.ticketId}`}
+                    className="block rounded-2xl border border-slate-100 p-5 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800/60"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-black text-slate-900 dark:text-white">{feedback.ticketTitle}</p>
+                        <p className="mt-1 text-xs font-bold text-slate-500 dark:text-slate-400">
+                          {feedback.requesterName || t('Unknown')} {feedback.technicianName ? `-> ${feedback.technicianName}` : ''}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1 text-amber-400">
+                        <Star size={16} fill="currentColor" />
+                        <span className="text-xs font-black text-slate-700 dark:text-slate-200">{feedback.rating}/5</span>
+                      </div>
+                    </div>
+                    {feedback.comment && (
+                      <p className="mt-4 line-clamp-3 text-sm font-medium leading-relaxed text-slate-600 dark:text-slate-300">{feedback.comment}</p>
+                    )}
+                  </Link>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
         {stats?.technicianStats && (
           <div className="lg:col-span-12 bg-white dark:bg-slate-900 p-8 rounded-3xl border border-slate-100 dark:border-slate-800 shadow-sm">
             <h3 className="text-xl font-black text-slate-900 dark:text-white mb-8">{t('Technician Performance')}</h3>
@@ -283,6 +361,7 @@ export default function Reports() {
                     <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{t('Resolved')}</th>
                     <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{t('Closed')}</th>
                     <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{t('Delayed Jobs')}</th>
+                    <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{t('Avg. Rating')}</th>
                     <th className="px-6 py-4 text-[10px] font-black text-slate-400 uppercase tracking-widest text-center">{t('Success Rate')}</th>
                   </tr>
                 </thead>
@@ -314,6 +393,11 @@ export default function Reports() {
                             : "bg-slate-50 dark:bg-slate-800 text-slate-400"
                         )}>
                           {tech?.delayed || 0}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 text-center">
+                        <span className="text-sm font-black text-slate-700 dark:text-slate-200">
+                          {tech?.averageRating ? `${tech.averageRating}/5` : '-'}
                         </span>
                       </td>
                       <td className="px-6 py-4 text-center">

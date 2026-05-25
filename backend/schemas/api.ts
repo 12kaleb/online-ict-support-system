@@ -31,6 +31,8 @@ const nonNegativeInteger = (field: string) =>
 const dateString = (field: string) =>
   z.string({ error: `${field} is required.` }).trim().refine((value) => !Number.isNaN(Date.parse(value)), `${field} must be a valid date.`);
 
+const isFutureOrCurrentDate = (value: string) => new Date(value).getTime() >= Date.now() - 60_000;
+
 const MAX_ATTACHMENT_DATA_URL_LENGTH = 2_500_000;
 const allowedAttachmentTypes = new Set([
   "application/pdf",
@@ -89,6 +91,8 @@ export const createTicketSchema = z.object({
   priority: ticketPrioritySchema.optional(),
   assetId: optionalId,
   location: coordinateSchema.optional(),
+  buildingBlockNo: requiredTrimmedString("Building block number", 120),
+  roomNumber: requiredTrimmedString("Room number", 120),
   attachments: z.array(attachmentSchema).max(10, "A ticket can include up to 10 attachments.").optional(),
   templateKey: optionalTrimmedString,
 });
@@ -147,7 +151,14 @@ export const quantitySchema = z.object({
 export const assetMaintenanceSchema = z.object({
   type: requiredTrimmedString("Maintenance type", 120),
   scheduledDate: dateString("Scheduled date"),
+  endDate: dateString("End date").optional(),
   description: requiredTrimmedString("Description", 2_000),
+}).refine((value) => isFutureOrCurrentDate(value.scheduledDate), {
+  message: "Scheduled date cannot be in the past.",
+  path: ["scheduledDate"],
+}).refine((value) => !value.endDate || new Date(value.endDate).getTime() > new Date(value.scheduledDate).getTime(), {
+  message: "End date must be after the scheduled date.",
+  path: ["endDate"],
 });
 
 export const updateMaintenanceStatusSchema = z.object({
@@ -173,6 +184,9 @@ export const maintenanceSchema = z.object({
   type: requiredTrimmedString("Maintenance type", 120),
   technicianId: optionalNullableId,
   assetId: optionalNullableId,
+}).refine((value) => isFutureOrCurrentDate(value.startTime), {
+  message: "Start time cannot be in the past.",
+  path: ["startTime"],
 }).refine((value) => new Date(value.endTime).getTime() > new Date(value.startTime).getTime(), {
   message: "End time must be after start time.",
   path: ["endTime"],

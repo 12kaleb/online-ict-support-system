@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Plus, Calendar, Clock, Server, Network, HardDrive, UserPlus, X, AlertTriangle, CheckCircle, Info, ChevronLeft, ChevronRight, List, Trash2 } from 'lucide-react';
-import { format, isFuture, isPast, isToday, startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval, isSameMonth, isSameDay, addMonths, subMonths } from 'date-fns';
+import { format, isFuture, isPast, isToday, startOfMonth, endOfMonth, startOfWeek, endOfWeek, eachDayOfInterval, isSameMonth, isSameDay, isWithinInterval, addMonths, subMonths } from 'date-fns';
 import { useTranslation } from 'react-i18next';
 import { safeDate } from '../utils/dateUtils';
 import { handleResponse } from '../utils/apiUtils';
@@ -14,12 +14,25 @@ import { isManager } from '../lib/permissions';
 export default function Maintenance({ user }: { user: any }) {
   const { t } = useTranslation();
   const isManagerLevel = isManager(user);
+  const maintenanceDefaults = () => {
+    const start = new Date();
+    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    return {
+      title: '',
+      description: '',
+      startTime: format(start, "yyyy-MM-dd'T'HH:mm"),
+      endTime: format(end, "yyyy-MM-dd'T'HH:mm"),
+      type: 'Server',
+      technicianId: '',
+      assetId: ''
+    };
+  };
   const [maintenance, setMaintenance] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState<'list' | 'calendar'>('list');
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [open, setOpen] = useState(false);
-  const [newMaint, setNewMaint] = useState({ title: '', description: '', startTime: '', endTime: '', type: 'Server', technicianId: '', assetId: '' });
+  const [newMaint, setNewMaint] = useState(maintenanceDefaults);
   const [technicians, setTechnicians] = useState<any[]>([]);
   const [assets, setAssets] = useState<any[]>([]);
   const [assignDialogOpen, setAssignDialogOpen] = useState(false);
@@ -33,18 +46,22 @@ export default function Maintenance({ user }: { user: any }) {
     try {
       const [maintRes, techRes, assetRes] = await Promise.all([
         fetch('/api/maintenance'),
-        fetch('/api/technicians'),
-        fetch('/api/assets')
+        isManagerLevel ? fetch('/api/technicians') : Promise.resolve(null),
+        isManagerLevel ? fetch('/api/assets') : Promise.resolve(null)
       ]);
       
       const maintData = await handleResponse(maintRes);
       setMaintenance(Array.isArray(maintData) ? maintData : []);
       
-      const techData = await handleResponse(techRes);
-      setTechnicians(Array.isArray(techData) ? techData : []);
+      if (techRes) {
+        const techData = await handleResponse(techRes);
+        setTechnicians(Array.isArray(techData) ? techData : []);
+      }
       
-      const assetData = await handleResponse(assetRes);
-      setAssets(Array.isArray(assetData) ? assetData : []);
+      if (assetRes) {
+        const assetData = await handleResponse(assetRes);
+        setAssets(Array.isArray(assetData) ? assetData : []);
+      }
     } catch (err) {
       console.error("Fetch maintenance error:", err);
     } finally {
@@ -57,6 +74,20 @@ export default function Maintenance({ user }: { user: any }) {
   }, []);
 
   const handleAddMaintenance = async () => {
+    const start = new Date(newMaint.startTime);
+    const end = new Date(newMaint.endTime);
+    if (!newMaint.startTime || Number.isNaN(start.getTime())) {
+      toast.error('Start time is required.');
+      return;
+    }
+    if (start.getTime() < Date.now() - 60_000) {
+      toast.error('Maintenance cannot be scheduled in the past.');
+      return;
+    }
+    if (!newMaint.endTime || Number.isNaN(end.getTime()) || end.getTime() <= start.getTime()) {
+      toast.error('End time must be after the start time.');
+      return;
+    }
     try {
       const res = await fetch('/api/maintenance', {
         method: 'POST',
@@ -71,7 +102,7 @@ export default function Maintenance({ user }: { user: any }) {
       await handleResponse(res);
       toast.success('Maintenance added successfully');
       setOpen(false);
-      setNewMaint({ title: '', description: '', startTime: '', endTime: '', type: 'Server', technicianId: '', assetId: '' });
+      setNewMaint(maintenanceDefaults());
       fetchMaintenance();
     } catch (err: any) {
       toast.error(err.message || 'Failed to add maintenance');
@@ -172,7 +203,6 @@ export default function Maintenance({ user }: { user: any }) {
   };
 
   const getStatusBadge = (item: any) => {
-    const startTime = safeDate(item.startTime);
     const endTime = safeDate(item.endTime);
     const now = new Date();
 
@@ -184,13 +214,13 @@ export default function Maintenance({ user }: { user: any }) {
       );
     }
     
-    if (item.status === 'in-progress' || (now >= startTime && now <= endTime)) {
+    if (item.status === 'in-progress') {
       return (
         <span className="px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-rose-50 dark:bg-rose-900/20 text-rose-600">
           {t("Ongoing")}
         </span>
       );
-    } else if (isFuture(startTime)) {
+    } else if (isFuture(endTime)) {
       return (
         <span className="px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-blue-50 dark:bg-blue-900/20 text-blue-600">
           {t("Scheduled")}
@@ -222,7 +252,10 @@ export default function Maintenance({ user }: { user: any }) {
         </div>
         {isManagerLevel && (
           <button 
-            onClick={() => setOpen(true)}
+            onClick={() => {
+              setNewMaint(maintenanceDefaults());
+              setOpen(true);
+            }}
             className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl text-sm font-black transition-all shadow-lg shadow-blue-600/20"
           >
             <Plus size={18} />
@@ -307,7 +340,9 @@ export default function Maintenance({ user }: { user: any }) {
               <div className="flex items-center gap-2">
                 <Calendar size={16} className="text-slate-400" />
                 <span className="text-xs font-bold text-slate-600 dark:text-slate-400">
-                  {format(safeDate(item.startTime), 'MMM dd, yyyy')}
+                  {isSameDay(safeDate(item.startTime), safeDate(item.endTime))
+                    ? format(safeDate(item.startTime), 'MMM dd, yyyy')
+                    : `${format(safeDate(item.startTime), 'MMM dd, yyyy')} - ${format(safeDate(item.endTime), 'MMM dd, yyyy')}`}
                 </span>
               </div>
               <div className="flex items-center gap-2">
@@ -341,8 +376,9 @@ export default function Maintenance({ user }: { user: any }) {
                     {item.status === 'scheduled' && (
                       <button 
                         onClick={() => handleUpdateStatus(item.id, 'in-progress')}
-                        disabled={pendingMaintenanceAction !== null}
+                        disabled={!item.technicianId || pendingMaintenanceAction !== null}
                         className="px-4 py-2 bg-blue-50 dark:bg-blue-900/20 text-blue-600 hover:bg-blue-100 dark:hover:bg-blue-900/40 disabled:opacity-50 disabled:cursor-not-allowed text-[10px] font-black uppercase tracking-wider rounded-xl transition-all"
+                        title={!item.technicianId ? t('Assign Technician') : t('Start')}
                       >
                         {pendingMaintenanceAction === `${item.id}:in-progress` ? t('Saving...') : t('Start')}
                       </button>
@@ -370,13 +406,15 @@ export default function Maintenance({ user }: { user: any }) {
                 )}
                 {isManagerLevel && (
                   <>
-                    <button 
-                      onClick={() => handleOpenAssign(item)}
-                      className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-xl transition-all"
-                      title={t("Assign Technician")}
-                    >
-                      <UserPlus size={18} />
-                    </button>
+                    {item.status !== 'completed' && (
+                      <button 
+                        onClick={() => handleOpenAssign(item)}
+                        className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-xl transition-all"
+                        title={t("Assign Technician")}
+                      >
+                        <UserPlus size={18} />
+                      </button>
+                    )}
                     <button 
                       onClick={() => handleDeleteMaintenance(item.id)}
                       className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded-xl transition-all"
@@ -444,7 +482,11 @@ export default function Maintenance({ user }: { user: any }) {
               const calendarDays = eachDayOfInterval({ start: startDate, end: endDate });
 
               return calendarDays.map((day, i) => {
-                const dayMaintenance = maintenance.filter(m => isSameDay(safeDate(m.startTime), day));
+                const dayMaintenance = maintenance.filter((m) => {
+                  const start = safeDate(m.startTime);
+                  const end = safeDate(m.endTime);
+                  return isSameDay(start, day) || isSameDay(end, day) || isWithinInterval(day, { start, end });
+                });
                 
                 return (
                   <div 
@@ -466,9 +508,10 @@ export default function Maintenance({ user }: { user: any }) {
                       {dayMaintenance.map(m => (
                         <div 
                           key={m.id}
-                          onClick={() => handleOpenAssign(m)}
+                          onClick={() => isManagerLevel && handleOpenAssign(m)}
                           className={cn(
-                            "px-2 py-1 rounded-lg text-[9px] font-bold truncate cursor-pointer transition-all",
+                            "px-2 py-1 rounded-lg text-[9px] font-bold truncate transition-all",
+                            isManagerLevel && "cursor-pointer",
                             m.status === 'completed' ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600" :
                             m.status === 'in-progress' ? "bg-rose-50 dark:bg-rose-900/20 text-rose-600" :
                             "bg-blue-50 dark:bg-blue-900/20 text-blue-600"
@@ -539,7 +582,7 @@ export default function Maintenance({ user }: { user: any }) {
                       }}
                     >
                       <option value="">{t('None (General Maintenance)')}</option>
-                      {assets.filter((asset) => !asset.isConsumable && asset.quantity === 1).map((asset) => (
+                      {assets.filter((asset) => !asset.isConsumable && asset.quantity === 1 && !['maintenance', 'retired', 'requested'].includes(asset.status)).map((asset) => (
                         <option key={asset.id} value={asset.id}>
                           {asset.brand ? `${asset.brand} ` : ''}{asset.name} ({asset.serialNo || t('Individual Unit')})
                         </option>
@@ -581,7 +624,23 @@ export default function Maintenance({ user }: { user: any }) {
                         type="datetime-local"
                         className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border-none rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all"
                         value={newMaint.startTime}
-                        onChange={(e) => setNewMaint({ ...newMaint, startTime: e.target.value })}
+                        min={format(new Date(), "yyyy-MM-dd'T'HH:mm")}
+                        onChange={(e) => {
+                          const nextStart = e.target.value;
+                          const currentEnd = new Date(newMaint.endTime);
+                          const nextStartDate = new Date(nextStart);
+                          if (Number.isNaN(nextStartDate.getTime())) {
+                            setNewMaint({ ...newMaint, startTime: nextStart });
+                            return;
+                          }
+                          setNewMaint({
+                            ...newMaint,
+                            startTime: nextStart,
+                            endTime: Number.isNaN(currentEnd.getTime()) || currentEnd <= nextStartDate
+                              ? format(new Date(nextStartDate.getTime() + 60 * 60 * 1000), "yyyy-MM-dd'T'HH:mm")
+                              : newMaint.endTime
+                          });
+                        }}
                       />
                     </div>
                     <div>
@@ -590,6 +649,7 @@ export default function Maintenance({ user }: { user: any }) {
                         type="datetime-local"
                         className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border-none rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all"
                         value={newMaint.endTime}
+                        min={newMaint.startTime || format(new Date(), "yyyy-MM-dd'T'HH:mm")}
                         onChange={(e) => setNewMaint({ ...newMaint, endTime: e.target.value })}
                       />
                     </div>
@@ -656,9 +716,13 @@ export default function Maintenance({ user }: { user: any }) {
                     {t('Cancel')}
                   </button>
                   <button 
-                    disabled={selectedTechId === (selectedMaint?.technicianId || '')}
+                    disabled={
+                      selectedTechId === (selectedMaint?.technicianId || '') ||
+                      (selectedMaint?.status === 'in-progress' && !selectedTechId)
+                    }
                     onClick={handleAssign}
                     className="flex-1 px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl text-sm font-black transition-all shadow-lg shadow-blue-600/20"
+                    title={selectedMaint?.status === 'in-progress' && !selectedTechId ? t('In-progress maintenance cannot be unassigned') : t('Assign')}
                   >
                     {t('Assign')}
                   </button>

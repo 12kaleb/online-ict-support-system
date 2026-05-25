@@ -123,6 +123,10 @@ function parseOrigin(value?: string) {
   }
 }
 
+function isPresidentialBureauDepartment(department?: string | null) {
+  return Boolean(department?.trim().toLowerCase().includes("presidential bureau"));
+}
+
 const configuredOrigins = [
   parseOrigin(process.env.APP_BASE_URL),
   parseOrigin(process.env.FRONTEND_ORIGIN),
@@ -135,6 +139,15 @@ const configuredOrigins = [
 function isAllowedOrigin(origin?: string) {
   const parsedOrigin = parseOrigin(origin);
   return Boolean(parsedOrigin && configuredOrigins.includes(parsedOrigin));
+}
+
+function getInviteBaseUrl(req: express.Request) {
+  const origin = req.get("origin");
+  if (isAllowedOrigin(origin)) {
+    return parseOrigin(origin);
+  }
+
+  return parseOrigin(process.env.APP_BASE_URL) || parseOrigin(process.env.FRONTEND_ORIGIN) || undefined;
 }
 
 function parseCookieHeader(header?: string) {
@@ -745,13 +758,18 @@ async function startServer() {
   };
 
   // --- Helper: Create Notification ---
+  const serializeNotification = (notification: any) => ({
+    ...notification,
+    read: Boolean(notification.isRead),
+  });
+
   const createNotification = async (userId: string, title: string, message: string, link?: string) => {
     try {
       const notification = await prisma.notification.create({
         data: { userId, title, message, link }
       });
       // Emit real-time notification
-      io.to(userId).emit("notification", notification);
+      io.to(userId).emit("notification", serializeNotification(notification));
       const recipient = await prisma.profile.findUnique({
         where: { id: userId },
         select: { name: true, email: true, telegramChatId: true },
@@ -984,7 +1002,7 @@ async function startServer() {
         return pendingProfile;
       });
 
-      const inviteUrl = buildInviteUrl(token);
+      const inviteUrl = buildInviteUrl(token, getInviteBaseUrl(req));
       const mailResult = await sendInviteEmail({
         email: normalizedEmail,
         name,
@@ -1102,7 +1120,7 @@ async function startServer() {
           return pendingProfile;
         });
 
-        const inviteUrl = buildInviteUrl(token);
+        const inviteUrl = buildInviteUrl(token, getInviteBaseUrl(req));
         await sendInviteEmail({
           email: normalizedEmail,
           name: parsed.data.name,
@@ -1144,7 +1162,7 @@ async function startServer() {
       });
 
       if (!inviteToken) {
-        return res.status(404).json({ error: "Invite token is invalid." });
+        return res.status(400).json({ error: "Invite token is invalid. Please ask an administrator to send a new invitation." });
       }
 
       if (inviteToken.expiresAt.getTime() < Date.now()) {
@@ -1384,10 +1402,12 @@ async function startServer() {
 
   app.post("/api/tickets", authenticate, async (req: any, res, next) => {
     try {
-      const { title, description, category, priority, assetId, attachments, templateKey, location } = parseBody(createTicketSchema, req.body);
+      const { title, description, category, priority, assetId, attachments, templateKey, location, buildingBlockNo, roomNumber } = parseBody(createTicketSchema, req.body);
       const template = templateKey ? TICKET_TEMPLATES[templateKey] : null;
       const resolvedCategory = category || template?.category || "Other";
-      const resolvedPriority = priority || template?.priority || "medium";
+      const resolvedPriority = isPresidentialBureauDepartment(req.user.department)
+        ? "critical"
+        : priority || template?.priority || "medium";
       const resolvedTitle = title || template?.title;
       const resolvedDescription = description || template?.description;
 
@@ -1409,6 +1429,8 @@ async function startServer() {
           locationLatitude: location?.latitude ?? null,
           locationLongitude: location?.longitude ?? null,
           locationAccuracy: location?.accuracy ?? null,
+          buildingBlockNo,
+          roomNumber,
           dueDate,
           slaStatus: "on-track",
           attachments: attachments ? {
@@ -1493,6 +1515,15 @@ async function startServer() {
         if (req.user.role === "staff" && !["open", "closed"].includes(normalizedStatus)) {
           return res.status(403).json({ error: "Requesters can only reopen or close tickets from their view." });
         }
+        if (normalizedStatus === "closed" && !isManagerRole(req.user.role)) {
+          return res.status(403).json({ error: "Only managers can close invalid or unnecessary tickets." });
+        }
+        if (normalizedStatus === "closed" && ["pending-confirmation", "resolved"].includes(oldTicket.status)) {
+          return res.status(400).json({ error: "Solved tickets cannot be closed. Close is only for invalid or unnecessary tickets." });
+        }
+        if (normalizedStatus === "closed" && oldTicket.isApproved) {
+          return res.status(400).json({ error: "Approved solved tickets cannot be closed." });
+        }
         if (normalizedStatus === "closed" && shouldRequireClosureApproval(oldTicket) && !isManagerRole(req.user.role)) {
           const approvedClosureRequest = await prisma.approvalRequest.findFirst({
             where: {
@@ -1543,6 +1574,9 @@ async function startServer() {
         updateData.slaPausedRemainingMinutes = null;
         updateData.blockingReason = null;
         updateData.blockedAt = null;
+        updateData.slaStatus = null;
+        updateData.escalationLevel = 0;
+        updateData.escalatedAt = null;
       }
 
       const ticket = await prisma.ticket.update({
@@ -1696,13 +1730,52 @@ async function startServer() {
       if (!isAwaitingRequesterConfirmation) {
         return res.status(400).json({ error: "Only tickets awaiting confirmation can be reviewed" });
       }
+      if (!approved && ticket.status !== "pending-confirmation") {
+        return res.status(400).json({ error: "Only tickets awaiting requester confirmation can be sent back for more work." });
+      }
+
       if (!approved) {
-        return res.status(400).json({ error: "Resolved tickets cannot be reopened. If a closed ticket still needs work, submit an appeal." });
+        const updatedTicket = await prisma.ticket.update({
+          where: { id: req.params.id },
+          data: {
+            status: "open",
+            isApproved: false,
+            resolvedAt: null,
+            closedAt: null,
+          },
+        });
+
+        await logTicketHistory(ticket.id, req.user.id, "Reopened by Requester", "Requester reported that the issue is not solved");
+        if (ticket.assignedTo) {
+          await createNotification(ticket.assignedTo, "Ticket Needs More Work", `The requester reported ticket "${ticket.title}" is not solved.`, `/tickets/${ticket.id}`);
+        }
+
+        const managers = await prisma.profile.findMany({
+          where: { role: { in: ["manager", "admin"] } },
+          select: { id: true },
+        });
+        for (const manager of managers) {
+          await createNotification(manager.id, "Ticket Reopened", `${req.user.name} reported ticket "${ticket.title}" is not solved.`, `/tickets/${ticket.id}`);
+        }
+
+        return res.json(updatedTicket);
       }
 
       const updatedTicket = await prisma.ticket.update({
         where: { id: req.params.id },
-        data: { status: "resolved", isApproved: true, closedAt: null },
+        data: {
+          status: "resolved",
+          isApproved: true,
+          closedAt: null,
+          slaPaused: false,
+          slaPausedAt: null,
+          slaPausedRemainingMinutes: null,
+          blockingReason: null,
+          blockedAt: null,
+          slaStatus: null,
+          escalationLevel: 0,
+          escalatedAt: null,
+        },
       });
 
       await logTicketHistory(ticket.id, req.user.id, "Resolved and Approved", "Confirmed as solved by requester");
@@ -1763,13 +1836,55 @@ async function startServer() {
     try {
       const { rating, comment } = parseBody(feedbackSchema, req.body);
       
-      const ticket = await prisma.ticket.findUnique({ where: { id: req.params.id } });
+      const ticket = await prisma.ticket.findUnique({
+        where: { id: req.params.id },
+        include: { technician: { select: { id: true, name: true } } },
+      });
       if (!ticket) return res.status(404).json({ error: "Ticket not found" });
       if (ticket.userId !== req.user.id) return res.status(403).json({ error: "Forbidden" });
+      if (!["resolved", "closed"].includes(ticket.status)) {
+        return res.status(400).json({ error: "Feedback can only be submitted after a ticket is resolved or closed." });
+      }
 
-      const feedback = await prisma.feedback.create({
-        data: { rating, comment, ticketId: req.params.id }
+      const feedback = await prisma.feedback.upsert({
+        where: { ticketId: req.params.id },
+        update: { rating, comment },
+        create: { rating, comment, ticketId: req.params.id }
       });
+
+      const commentSuffix = comment ? ` Comment: ${comment}` : "";
+      await logTicketHistory(ticket.id, req.user.id, "Feedback Submitted", `Rating: ${rating}/5.${commentSuffix}`);
+
+      if (ticket.assignedTo) {
+        await createNotification(
+          ticket.assignedTo,
+          "Ticket Feedback Received",
+          `${req.user.name} rated ticket "${ticket.title}" ${rating}/5.${commentSuffix}`,
+          `/tickets/${ticket.id}`,
+        );
+      }
+
+      if (rating <= 2 || comment) {
+        const managers = await prisma.profile.findMany({
+          where: { role: { in: ["manager", "admin"] } },
+          select: { id: true },
+        });
+        for (const manager of managers) {
+          await createNotification(
+            manager.id,
+            rating <= 2 ? "Low Ticket Rating" : "Ticket Feedback Comment",
+            `${req.user.name} rated ticket "${ticket.title}" ${rating}/5.${commentSuffix}`,
+            `/tickets/${ticket.id}`,
+          );
+        }
+      }
+
+      await writeAuditLog(req.user, "ticket.feedback_submitted", {
+        ticketId: ticket.id,
+        rating,
+        hasComment: Boolean(comment),
+      });
+
       res.json(feedback);
     } catch (err) {
       next(err);
@@ -2253,7 +2368,7 @@ async function startServer() {
 
   app.post("/api/assets/:id/maintenance", authenticate, isInventoryManager, async (req, res, next) => {
     try {
-      const { type, scheduledDate, description } = parseBody(assetMaintenanceSchema, req.body);
+      const { type, scheduledDate, endDate, description } = parseBody(assetMaintenanceSchema, req.body);
       const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
       if (!asset) return res.status(404).json({ error: "Asset not found" });
       if (asset.isConsumable) {
@@ -2265,15 +2380,23 @@ async function startServer() {
       if (asset.status === "maintenance") {
         return res.status(400).json({ error: "Asset is already under maintenance" });
       }
+      if (asset.status === "retired") {
+        return res.status(400).json({ error: "Retired assets cannot be scheduled for maintenance" });
+      }
+      if (asset.status === "requested") {
+        return res.status(400).json({ error: "Requested assets cannot be scheduled for maintenance" });
+      }
       const assetName = asset.name;
+      const startTime = new Date(scheduledDate);
+      const endTime = endDate ? new Date(endDate) : new Date(startTime.getTime() + 3600000);
 
       const maintenance = await prisma.maintenance.create({
         data: {
           assetId: req.params.id,
           title: `Maintenance for ${assetName}`, // Better title
           type,
-          startTime: new Date(scheduledDate),
-          endTime: new Date(new Date(scheduledDate).getTime() + 3600000), // Default 1 hour
+          startTime,
+          endTime,
           description,
           status: "scheduled"
         }
@@ -2293,8 +2416,20 @@ async function startServer() {
       const { status } = parseBody(updateMaintenanceStatusSchema, req.body);
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Maintenance record not found" });
+      if (status === "in-progress" && !exists.technicianId) {
+        return res.status(400).json({ error: "Assign a technician before starting maintenance" });
+      }
       if (status === "completed" && !exists.technicianId) {
         return res.status(400).json({ error: "Assign a technician before completing maintenance" });
+      }
+      if (exists.status === "scheduled" && status === "completed") {
+        return res.status(400).json({ error: "Start maintenance before completing it" });
+      }
+      if (exists.status === "completed" && status !== "completed") {
+        return res.status(400).json({ error: "Completed maintenance cannot be reopened" });
+      }
+      if (exists.status === "in-progress" && status === "scheduled") {
+        return res.status(400).json({ error: "In-progress maintenance cannot be moved back to scheduled" });
       }
 
       const maintenance = await prisma.maintenance.update({
@@ -2371,6 +2506,9 @@ async function startServer() {
       if (asset.status === "maintenance") {
         return res.status(400).json({ error: "Assets under maintenance cannot be requested" });
       }
+      if (asset.status === "retired") {
+        return res.status(400).json({ error: "Retired assets cannot be requested" });
+      }
 
       const requestedQty = quantity;
       if (!asset.isConsumable && requestedQty !== 1) {
@@ -2381,22 +2519,34 @@ async function startServer() {
         return res.status(400).json({ error: "This device is not available for requests" });
       }
 
-      const [request] = await prisma.$transaction([
-        prisma.assetRequest.create({
-          data: {
-            assetId,
-            userId,
-            quantity: requestedQty,
-            status: "pending"
-          }
-        }),
-        prisma.asset.update({
+      const activeRequest = !asset.isConsumable ? await prisma.assetRequest.findFirst({
+        where: {
+          assetId,
+          status: { in: ["pending-approval", "pending", "fulfilled"] },
+        },
+      }) : null;
+      if (activeRequest) {
+        return res.status(400).json({ error: "This asset already has an active request" });
+      }
+
+      const needsManagerApproval = req.user.role === "technician";
+      const request = await prisma.assetRequest.create({
+        data: {
+          assetId,
+          userId,
+          quantity: requestedQty,
+          status: needsManagerApproval ? "pending-approval" : "pending"
+        }
+      });
+
+      if (!needsManagerApproval) {
+        await prisma.asset.update({
           where: { id: assetId },
           data: asset.isConsumable
             ? { status: requestedQty === asset.quantity ? "requested" : asset.status }
             : { status: "requested" }
-        })
-      ]);
+        });
+      }
 
       // Notify managers
       const managers = await prisma.profile.findMany({
@@ -2404,10 +2554,62 @@ async function startServer() {
         select: { id: true }
       });
       for (const manager of managers) {
-        await createNotification(manager.id, "New Asset Request", `${req.user.name} requested ${requestedQty}x ${asset.name}.`, `/assets`);
+        await createNotification(
+          manager.id,
+          needsManagerApproval ? "Asset Request Needs Approval" : "New Asset Request",
+          `${req.user.name} requested ${requestedQty}x ${asset.name}.`,
+          `/assets`,
+        );
       }
 
       res.json(request);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.put("/api/assets/requests/:id/approve", authenticate, isManager, async (req: any, res, next) => {
+    try {
+      const requestId = req.params.id;
+      const request = await prisma.assetRequest.findUnique({
+        where: { id: requestId },
+        include: { asset: true, user: true },
+      });
+      if (!request) return res.status(404).json({ error: "Request not found" });
+      if (request.status !== "pending-approval") return res.status(400).json({ error: "Only requests pending approval can be approved" });
+      if (request.asset.status === "maintenance") {
+        return res.status(400).json({ error: "Assets under maintenance cannot be approved" });
+      }
+      if (request.asset.status === "retired") {
+        return res.status(400).json({ error: "Retired assets cannot be approved" });
+      }
+      if (request.asset.isConsumable && request.asset.quantity < request.quantity) {
+        return res.status(400).json({ error: "Requested quantity exceeds available stock" });
+      }
+      if (!request.asset.isConsumable && request.asset.status !== "active") {
+        return res.status(400).json({ error: "This device is no longer available" });
+      }
+
+      const [updatedRequest] = await prisma.$transaction([
+        prisma.assetRequest.update({
+          where: { id: requestId },
+          data: { status: "pending" },
+          include: {
+            asset: { select: { name: true, type: true, brand: true } },
+            user: { select: { name: true, email: true } },
+          },
+        }),
+        prisma.asset.update({
+          where: { id: request.assetId },
+          data: request.asset.isConsumable
+            ? { status: request.quantity === request.asset.quantity ? "requested" : request.asset.status }
+            : { status: "requested" },
+        }),
+      ]);
+
+      await createNotification(request.userId, "Asset Request Approved", `Your request for ${request.quantity}x ${request.asset.name} was approved.`, `/assets`);
+
+      res.json(updatedRequest);
     } catch (err) {
       next(err);
     }
@@ -2422,6 +2624,7 @@ async function startServer() {
       });
       if (!request) return res.status(404).json({ error: "Request not found" });
       if (request.status === "fulfilled") return res.status(400).json({ error: "Request already fulfilled" });
+      if (request.status === "pending-approval") return res.status(400).json({ error: "Manager approval is required before fulfillment" });
       if (request.asset.isConsumable && request.asset.quantity < request.quantity) {
         return res.status(400).json({ error: "Asset out of stock or insufficient quantity" });
       }
@@ -2604,11 +2807,27 @@ async function startServer() {
       const oldAsset = await prisma.asset.findUnique({ where: { id: assetId } });
       if (!oldAsset) return res.status(404).json({ error: "Asset not found" });
 
+      if (status === "retired" && !isManagerRole((req as any).user.role)) {
+        return res.status(403).json({ error: "Only managers or admins can retire assets" });
+      }
+
       const normalizedIsConsumable = isConsumable ?? oldAsset.isConsumable;
       const normalizedMinStockLevel = minStockLevel ?? oldAsset.minStockLevel;
       const normalizedQuantity = normalizedIsConsumable
         ? quantity ?? oldAsset.quantity
         : 1;
+
+      if (status === "retired" && oldAsset.status !== "retired") {
+        const [activeMaintenance, pendingRequests, activeUsage] = await Promise.all([
+          prisma.maintenance.count({ where: { assetId, status: { not: "completed" } } }),
+          prisma.assetRequest.count({ where: { assetId, status: { in: ["pending", "fulfilled"] } } }),
+          prisma.assetUsage.count({ where: { assetId, status: "in-use" } }),
+        ]);
+
+        if (activeMaintenance > 0 || pendingRequests > 0 || activeUsage > 0) {
+          return res.status(400).json({ error: "Cannot retire asset while it has active maintenance, requests, or usage" });
+        }
+      }
 
       if (oldAsset.isConsumable !== normalizedIsConsumable) {
         return res.status(400).json({ error: "Change the inventory kind by creating a new asset record instead of converting this one" });
@@ -2913,7 +3132,19 @@ async function startServer() {
         orderBy: { createdAt: "desc" },
         take: 20
       });
-      res.json(notifications);
+      res.json(notifications.map(serializeNotification));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.put("/api/notifications/read-all", authenticate, async (req: any, res, next) => {
+    try {
+      await prisma.notification.updateMany({
+        where: { userId: req.user.id, isRead: false },
+        data: { isRead: true },
+      });
+      res.json({ success: true });
     } catch (err) {
       next(err);
     }
@@ -2925,11 +3156,11 @@ async function startServer() {
       if (!notification) return res.status(404).json({ error: "Notification not found" });
       if (notification.userId !== req.user.id) return res.status(403).json({ error: "Forbidden" });
 
-      await prisma.notification.update({
+      const updatedNotification = await prisma.notification.update({
         where: { id: req.params.id },
         data: { isRead: true }
       });
-      res.json({ success: true });
+      res.json(serializeNotification(updatedNotification));
     } catch (err) {
       next(err);
     }
@@ -2940,7 +3171,14 @@ async function startServer() {
     try {
       let where: any = {};
       if (req.user.role === "technician") {
-        where = { technicianId: req.user.id };
+        where = {
+          OR: [
+            { assetId: null },
+            { technicianId: req.user.id },
+          ],
+        };
+      } else if (!isManagerRole(req.user.role)) {
+        where = { assetId: null };
       }
 
       const maintenance = await prisma.maintenance.findMany({
@@ -2960,6 +3198,25 @@ async function startServer() {
   app.post("/api/maintenance", authenticate, isInventoryManager, async (req, res, next) => {
     try {
       const { title, description, startTime, endTime, type, technicianId, assetId } = parseBody(maintenanceSchema, req.body);
+      if (assetId) {
+        const asset = await prisma.asset.findUnique({ where: { id: assetId } });
+        if (!asset) return res.status(404).json({ error: "Asset not found" });
+        if (asset.isConsumable) {
+          return res.status(400).json({ error: "Consumables cannot be scheduled for maintenance" });
+        }
+        if (asset.quantity !== 1) {
+          return res.status(400).json({ error: "Maintenance can only be scheduled for individual asset units" });
+        }
+        if (asset.status === "maintenance") {
+          return res.status(400).json({ error: "Asset is already under maintenance" });
+        }
+        if (asset.status === "retired") {
+          return res.status(400).json({ error: "Retired assets cannot be scheduled for maintenance" });
+        }
+        if (asset.status === "requested") {
+          return res.status(400).json({ error: "Requested assets cannot be scheduled for maintenance" });
+        }
+      }
       if (technicianId) {
         const tech = await prisma.profile.findUnique({ where: { id: technicianId } });
         if (!tech || tech.role !== "technician") {
@@ -2995,8 +3252,20 @@ async function startServer() {
       const { status } = parseBody(updateMaintenanceStatusSchema, req.body);
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Maintenance not found" });
+      if (status === "in-progress" && !exists.technicianId) {
+        return res.status(400).json({ error: "Assign a technician before starting maintenance" });
+      }
       if (status === "completed" && !exists.technicianId) {
         return res.status(400).json({ error: "Assign a technician before completing maintenance" });
+      }
+      if (exists.status === "scheduled" && status === "completed") {
+        return res.status(400).json({ error: "Start maintenance before completing it" });
+      }
+      if (exists.status === "completed" && status !== "completed") {
+        return res.status(400).json({ error: "Completed maintenance cannot be reopened" });
+      }
+      if (exists.status === "in-progress" && status === "scheduled") {
+        return res.status(400).json({ error: "In-progress maintenance cannot be moved back to scheduled" });
       }
 
       const maintenance = await prisma.maintenance.update({
@@ -3030,6 +3299,12 @@ async function startServer() {
       const { technicianId } = parseBody(maintenanceAssignSchema, req.body);
       const exists = await prisma.maintenance.findUnique({ where: { id: req.params.id } });
       if (!exists) return res.status(404).json({ error: "Maintenance not found" });
+      if (exists.status === "completed") {
+        return res.status(400).json({ error: "Completed maintenance cannot be reassigned" });
+      }
+      if (exists.status === "in-progress" && !technicianId) {
+        return res.status(400).json({ error: "In-progress maintenance cannot be unassigned" });
+      }
 
       if (technicianId) {
         const tech = await prisma.profile.findUnique({ where: { id: technicianId } });
@@ -3613,8 +3888,12 @@ async function startServer() {
           ...(req.user.role === "technician" ? { technicianId: req.user.id } : {})
         } 
       });
-      const slaAtRisk = await prisma.ticket.count({ where: { ...where, slaStatus: "at-risk" } });
-      const slaBreached = await prisma.ticket.count({ where: { ...where, slaStatus: "breached" } });
+      const activeSlaWhere = {
+        ...where,
+        status: { notIn: ["pending-confirmation", "resolved", "closed"] },
+      };
+      const slaAtRisk = await prisma.ticket.count({ where: { ...activeSlaWhere, slaStatus: "at-risk" } });
+      const slaBreached = await prisma.ticket.count({ where: { ...activeSlaWhere, slaStatus: "breached" } });
       const openApprovals = isManagerRole(req.user.role)
         ? await prisma.approvalRequest.count({ where: { status: "pending" } })
         : 0;
@@ -3642,6 +3921,35 @@ async function startServer() {
       const slaPerformance = slaResolvedOnTimeBase.length > 0
         ? Math.round((slaResolvedOnTime / slaResolvedOnTimeBase.length) * 100)
         : 100;
+      const feedbackWhere = { ticket: where };
+      const feedbackSummary = await prisma.feedback.aggregate({
+        where: feedbackWhere,
+        _avg: { rating: true },
+        _count: { id: true },
+      });
+      const feedbackItems = await prisma.feedback.findMany({
+        where: feedbackWhere,
+        include: {
+          ticket: {
+            select: {
+              id: true,
+              title: true,
+              assignedTo: true,
+              user: { select: { name: true } },
+              technician: { select: { name: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 8,
+      });
+      const feedbackDistribution = await Promise.all([1, 2, 3, 4, 5].map(async (rating) => ({
+        rating,
+        count: await prisma.feedback.count({ where: { ...feedbackWhere, rating } }),
+      })));
+      const lowFeedbackCount = await prisma.feedback.count({
+        where: { ...feedbackWhere, rating: { lte: 2 } },
+      });
 
       // Technician specific report (for managers)
       let technicianStats = null;
@@ -3654,21 +3962,27 @@ async function startServer() {
             assigned: {
               select: {
                 status: true,
-                isDelayed: true
+                isDelayed: true,
+                feedback: { select: { rating: true } },
               }
             }
           }
         });
 
-        technicianStats = technicians.map(tech => ({
-          id: tech.id,
-          name: tech.name,
-          total: tech.assigned.length,
-          resolved: tech.assigned.filter(t => t.status === "resolved").length,
-          closed: tech.assigned.filter(t => t.status === "closed").length,
-          completed: tech.assigned.filter(t => completedStatuses.includes(t.status)).length,
-          delayed: tech.assigned.filter(t => t.isDelayed).length
-        }));
+        technicianStats = technicians.map(tech => {
+          const ratings = tech.assigned.map((ticket) => ticket.feedback?.rating).filter((rating): rating is number => typeof rating === "number");
+          return {
+            id: tech.id,
+            name: tech.name,
+            total: tech.assigned.length,
+            resolved: tech.assigned.filter(t => t.status === "resolved").length,
+            closed: tech.assigned.filter(t => t.status === "closed").length,
+            completed: tech.assigned.filter(t => completedStatuses.includes(t.status)).length,
+            delayed: tech.assigned.filter(t => t.isDelayed).length,
+            feedbackCount: ratings.length,
+            averageRating: ratings.length ? Number((ratings.reduce((sum, rating) => sum + rating, 0) / ratings.length).toFixed(1)) : null,
+          };
+        });
       }
 
       res.json({ 
@@ -3691,6 +4005,22 @@ async function startServer() {
         slaPerformance,
         openApprovals,
         assetHealth,
+        feedback: {
+          averageRating: feedbackSummary._avg.rating ? Number(feedbackSummary._avg.rating.toFixed(1)) : null,
+          total: feedbackSummary._count.id,
+          lowCount: lowFeedbackCount,
+          distribution: feedbackDistribution,
+          recent: feedbackItems.map((feedback) => ({
+            id: feedback.id,
+            ticketId: feedback.ticketId,
+            ticketTitle: feedback.ticket.title,
+            rating: feedback.rating,
+            comment: feedback.comment,
+            createdAt: feedback.createdAt,
+            requesterName: feedback.ticket.user?.name,
+            technicianName: feedback.ticket.technician?.name,
+          })),
+        },
       });
     } catch (err) {
       next(err);

@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { handleResponse } from '../utils/apiUtils';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
+import { useAuth } from '../contexts/AuthContext';
 
 const CATEGORIES = ['Hardware', 'Software', 'Network', 'Account/Access', 'Other'];
 const PRIORITIES = ['low', 'medium', 'high', 'critical'];
@@ -26,24 +27,26 @@ type TicketLocation = {
 
 export default function CreateTicket() {
   const { t } = useTranslation();
+  const { user } = useAuth();
   const navigate = useNavigate();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [category, setCategory] = useState('Hardware');
   const [priority, setPriority] = useState('medium');
-  const [assetId, setAssetId] = useState('');
+  const [buildingBlockNo, setBuildingBlockNo] = useState('');
+  const [roomNumber, setRoomNumber] = useState('');
   const [templateKey, setTemplateKey] = useState('');
-  const [assets, setAssets] = useState<any[]>([]);
   const [attachments, setAttachments] = useState<any[]>([]);
   const [location, setLocation] = useState<TicketLocation | null>(null);
   const [locationLoading, setLocationLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const isPresidentialBureau = Boolean(user?.department?.trim().toLowerCase().includes('presidential bureau'));
 
   useEffect(() => {
-    fetch('/api/assets')
-      .then(res => res.json())
-      .then(data => setAssets(data));
-  }, []);
+    if (isPresidentialBureau) {
+      setPriority('critical');
+    }
+  }, [isPresidentialBureau]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -103,14 +106,25 @@ export default function CreateTicket() {
     e.preventDefault();
     setLoading(true);
     try {
+      const resolvedPriority = isPresidentialBureau ? 'critical' : priority;
       const res = await fetch('/api/tickets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, description, category, priority, assetId, attachments, location: location || undefined, templateKey: templateKey || undefined }),
+        body: JSON.stringify({
+          title,
+          description,
+          category,
+          priority: resolvedPriority,
+          attachments,
+          location: location || undefined,
+          buildingBlockNo,
+          roomNumber,
+          templateKey: templateKey || undefined,
+        }),
       });
       await handleResponse(res);
       toast.success('Ticket created successfully');
-      navigate('/');
+      navigate('/dashboard');
     } catch (err: any) {
       toast.error(err.message || 'Failed to create ticket');
     } finally {
@@ -123,7 +137,7 @@ export default function CreateTicket() {
     const template = TEMPLATES.find((item) => item.key === key);
     if (!template) return;
     setCategory(template.category);
-    setPriority(template.priority);
+    setPriority(isPresidentialBureau ? 'critical' : template.priority);
     setTitle((prev) => prev || template.title);
     setDescription((prev) => prev || template.description);
   };
@@ -203,30 +217,44 @@ export default function CreateTicket() {
                 <label className="text-sm font-black text-slate-700 dark:text-slate-300 uppercase tracking-wider ml-1">{t('Priority')}</label>
                 <select 
                   value={priority}
-                  onChange={(e) => setPriority(e.target.value)}
+                  onChange={(e) => setPriority(isPresidentialBureau ? 'critical' : e.target.value)}
+                  disabled={isPresidentialBureau}
                   className={cn(
-                    "w-full px-5 py-4 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none font-bold appearance-none",
+                    "w-full px-5 py-4 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none font-bold appearance-none disabled:cursor-not-allowed disabled:opacity-80",
                     getPriorityColor(priority)
                   )}
                 >
                   {PRIORITIES.map(p => <option key={p} value={p} className="bg-white dark:bg-slate-900">{t(p)}</option>)}
                 </select>
+                {isPresidentialBureau && (
+                  <p className="ml-1 text-xs font-bold text-red-600 dark:text-red-400">
+                    {t('Presidential Bureau tickets are critical by default.')}
+                  </p>
+                )}
               </div>
 
-              <div className="md:col-span-2 space-y-2">
-                <label className="text-sm font-black text-slate-700 dark:text-slate-300 uppercase tracking-wider ml-1">{t('Related Asset (Optional)')}</label>
-                <select 
-                  value={assetId}
-                  onChange={(e) => setAssetId(e.target.value)}
-                  className="w-full px-5 py-4 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none font-medium appearance-none text-slate-900 dark:text-white"
-                >
-                  <option value="" className="bg-white dark:bg-slate-900">{t('None')}</option>
-                  {assets.map(asset => (
-                    <option key={asset.id} value={asset.id} className="bg-white dark:bg-slate-900">
-                      {asset.brand ? `${asset.brand} ` : ''}{asset.name} ({asset.serialNo || t('No Serial')})
-                    </option>
-                  ))}
-                </select>
+              <div className="space-y-2">
+                <label className="text-sm font-black text-slate-700 dark:text-slate-300 uppercase tracking-wider ml-1">{t('Building Block No')}</label>
+                <input
+                  type="text"
+                  required
+                  value={buildingBlockNo}
+                  onChange={(e) => setBuildingBlockNo(e.target.value)}
+                  className="w-full px-5 py-4 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none font-medium text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500"
+                  placeholder={t('e.g., Block A')}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-sm font-black text-slate-700 dark:text-slate-300 uppercase tracking-wider ml-1">{t('Room Number')}</label>
+                <input
+                  type="text"
+                  required
+                  value={roomNumber}
+                  onChange={(e) => setRoomNumber(e.target.value)}
+                  className="w-full px-5 py-4 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all outline-none font-medium text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500"
+                  placeholder={t('e.g., 204')}
+                />
               </div>
 
               <div className="md:col-span-2 space-y-3">

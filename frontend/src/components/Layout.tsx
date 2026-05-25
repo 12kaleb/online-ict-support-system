@@ -118,7 +118,7 @@ export default function Layout({ user, onLogout, children }: { user: any, onLogo
   };
 
   const navItems = [
-    { label: t('Dashboard'), path: '/', icon: <LayoutDashboard size={18} /> },
+    { label: t('Dashboard'), path: '/dashboard', icon: <LayoutDashboard size={18} /> },
     { label: t('Maintenance'), path: '/maintenance', icon: <Calendar size={18} /> },
     { label: t('FAQ'), path: '/faq', icon: <HelpCircle size={18} /> },
   ];
@@ -136,6 +136,9 @@ export default function Layout({ user, onLogout, children }: { user: any, onLogo
     }
   }
 
+  const isNavItemActive = (path: string) =>
+    pathname === path || (path !== '/reports' && pathname.startsWith(`${path}/`));
+
   return (
     <div
       className="flex min-h-screen flex-col text-slate-900 transition-colors duration-200 dark:text-slate-100 lg:flex-row"
@@ -152,7 +155,7 @@ export default function Layout({ user, onLogout, children }: { user: any, onLogo
           <div className="flex min-h-16 items-center justify-between gap-3 py-2 lg:h-full lg:flex-col lg:items-stretch lg:gap-4 lg:py-5">
             {/* Logo */}
             <div className="flex min-w-0 items-center gap-6 lg:flex-col lg:items-stretch">
-              <Link to="/" className="flex items-center gap-2 group">
+              <Link to="/dashboard" className="flex items-center gap-2 group">
                 <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-950 text-white shadow-sm transition-transform group-hover:scale-105 group-active:scale-95 dark:bg-white dark:text-slate-950">
                   <Ticket size={20} />
                 </div>
@@ -169,12 +172,12 @@ export default function Layout({ user, onLogout, children }: { user: any, onLogo
                     to={item.path}
                     className={cn(
                       "relative flex items-center gap-2 rounded-xl px-3 py-2.5 text-sm font-bold transition-all",
-                      pathname === item.path || (item.path === '/reports' && pathname.startsWith('/reports'))
+                      isNavItemActive(item.path)
                         ? "text-white shadow-sm dark:text-slate-950"
                         : "text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-white"
                     )}
                   >
-                    {(pathname === item.path || (item.path === '/reports' && pathname.startsWith('/reports'))) && (
+                    {isNavItemActive(item.path) && (
                       <motion.span
                         layoutId="desktop-nav-active"
                         className="absolute inset-0 rounded-xl bg-slate-950 dark:bg-white"
@@ -336,24 +339,36 @@ export default function Layout({ user, onLogout, children }: { user: any, onLogo
                             </div>
                           ) : (
                             notifications.map((n) => (
-                              <button
+                              <div
                                 key={n.id}
-                                onClick={() => {
-                                  if (n.link) navigate(n.link);
-                                  markAsRead(n.id);
-                                  setIsNotifMenuOpen(false);
-                                }}
                                 className={cn(
-                                  "w-full text-left p-4 transition-colors border-b border-slate-50 dark:border-slate-800 last:border-0",
+                                  "p-4 transition-colors border-b border-slate-50 dark:border-slate-800 last:border-0",
                                   n.read ? "opacity-60" : "bg-blue-50/30 dark:bg-blue-900/10 border-l-4 border-l-blue-600"
                                 )}
                               >
-                                <p className={cn("text-sm", !n.read && "font-bold")}>{n.title}</p>
-                                <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>
-                                <p className="text-[10px] text-slate-400 mt-1">
-                                  {format(safeDate(n.createdAt), 'MMM dd, HH:mm')}
-                                </p>
-                              </button>
+                                <button
+                                  onClick={async () => {
+                                    await markAsRead(n.id);
+                                    if (n.link) navigate(n.link);
+                                    setIsNotifMenuOpen(false);
+                                  }}
+                                  className="w-full text-left"
+                                >
+                                  <p className={cn("text-sm", !n.read && "font-bold")}>{n.title}</p>
+                                  <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{n.message}</p>
+                                  <p className="text-[10px] text-slate-400 mt-1">
+                                    {format(safeDate(n.createdAt), 'MMM dd, HH:mm')}
+                                  </p>
+                                </button>
+                                {!n.read && (
+                                  <button
+                                    onClick={() => markAsRead(n.id)}
+                                    className="mt-2 text-[10px] font-bold uppercase text-blue-600 transition-colors hover:text-blue-700"
+                                  >
+                                    Mark read
+                                  </button>
+                                )}
+                              </div>
                             ))
                           )}
                         </div>
@@ -420,14 +435,14 @@ export default function Layout({ user, onLogout, children }: { user: any, onLogo
               <Link
                 key={item.path}
                 to={item.path}
-                className={cn(
-                  "relative flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-xs font-black transition-all",
-                  pathname === item.path || (item.path === '/reports' && pathname.startsWith('/reports'))
+                  className={cn(
+                    "relative flex shrink-0 items-center gap-2 rounded-xl px-3 py-2 text-xs font-black transition-all",
+                  isNavItemActive(item.path)
                     ? "text-white dark:text-slate-950"
                     : "text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
                 )}
               >
-                {(pathname === item.path || (item.path === '/reports' && pathname.startsWith('/reports'))) && (
+                {isNavItemActive(item.path) && (
                   <motion.span
                     layoutId="mobile-nav-active"
                     className="absolute inset-0 rounded-xl bg-slate-950 dark:bg-white"

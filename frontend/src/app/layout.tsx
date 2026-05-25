@@ -4,8 +4,8 @@ import './globals.css';
 import Providers from './providers';
 
 export const metadata: Metadata = {
-  title: 'ICT Support',
-  description: 'Enterprise support management system',
+  title: 'Woldia University ICTD Support',
+  description: 'ICTD support portal for the Woldia University community',
 };
 
 export default function RootLayout({

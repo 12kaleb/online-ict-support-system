@@ -10,6 +10,7 @@ interface Notification {
   message: string;
   link?: string;
   read: boolean;
+  isRead?: boolean;
   createdAt: string;
 }
 
@@ -26,15 +27,33 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode; user: a
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [socket, setSocket] = useState<Socket | null>(null);
 
+  const normalizeNotification = (notification: Notification) => ({
+    ...notification,
+    read: Boolean(notification.read ?? notification.isRead),
+  });
+
   const fetchNotifications = async () => {
     try {
       const res = await fetch('/api/notifications');
       if (res.ok) {
         const data = await res.json();
-        setNotifications(data);
+        setNotifications(Array.isArray(data) ? data.map(normalizeNotification) : []);
       }
     } catch (err) {
       console.error('Failed to fetch notifications:', err);
+    }
+  };
+
+  const markAsRead = async (id: string) => {
+    try {
+      const res = await fetch(`/api/notifications/${id}/read`, { method: 'PUT' });
+      if (res.ok) {
+        setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
+      } else {
+        console.error('Failed to mark notification as read:', await res.text());
+      }
+    } catch (err) {
+      console.error('Failed to mark notification as read:', err);
     }
   };
 
@@ -46,12 +65,15 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode; user: a
       setSocket(newSocket);
 
       newSocket.on('notification', (notification: Notification) => {
-        setNotifications(prev => [notification, ...prev]);
+        setNotifications(prev => [normalizeNotification(notification), ...prev]);
         toast.info(notification.title, {
           description: notification.message,
           action: notification.link ? {
             label: 'View',
-            onClick: () => window.location.href = notification.link!
+            onClick: async () => {
+              await markAsRead(notification.id);
+              window.location.href = notification.link!;
+            }
           } : undefined
         });
       });
@@ -64,22 +86,13 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode; user: a
     return undefined;
   }, [user]);
 
-  const markAsRead = async (id: string) => {
-    try {
-      const res = await fetch(`/api/notifications/${id}/read`, { method: 'PUT' });
-      if (res.ok) {
-        setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
-      }
-    } catch (err) {
-      console.error('Failed to mark notification as read:', err);
-    }
-  };
-
   const markAllAsRead = async () => {
     try {
       const res = await fetch('/api/notifications/read-all', { method: 'PUT' });
       if (res.ok) {
         setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+      } else {
+        console.error('Failed to mark all notifications as read:', await res.text());
       }
     } catch (err) {
       console.error('Failed to mark all notifications as read:', err);

@@ -1,11 +1,15 @@
 import { sendMail } from "./mailer.js";
 
-function getBaseUrl() {
+function getBaseUrl(baseUrl?: string) {
+  if (baseUrl) {
+    return baseUrl.replace(/\/+$/, "");
+  }
+
   return (process.env.APP_BASE_URL || "https://domain.com").replace(/\/+$/, "");
 }
 
-export function buildInviteUrl(token: string) {
-  return `${getBaseUrl()}/setup-password?token=${encodeURIComponent(token)}`;
+export function buildInviteUrl(token: string, baseUrl?: string) {
+  return `${getBaseUrl(baseUrl)}/setup-password?token=${encodeURIComponent(token)}`;
 }
 
 export async function sendInviteEmail(input: {

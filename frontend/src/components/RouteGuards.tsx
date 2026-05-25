@@ -78,7 +78,7 @@ export function PublicOnlyRoute({
 
   useEffect(() => {
     if (!loading && user) {
-      router.replace('/');
+      router.replace('/dashboard');
     }
   }, [loading, router, user]);
 
@@ -90,7 +90,7 @@ export function PublicOnlyRoute({
     <>
       {children((nextUser) => {
         setUser(nextUser);
-        router.replace('/');
+        router.replace('/dashboard');
       })}
     </>
   );

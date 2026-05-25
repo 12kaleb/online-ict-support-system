@@ -29,10 +29,13 @@ export async function sendTelegramNotification(input: {
   link?: string;
 }) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = input.chatId || process.env.TELEGRAM_DEFAULT_CHAT_ID;
+  if (!token) {
+    return { delivered: false, reason: "Telegram bot token is not configured." };
+  }
 
-  if (!token || !chatId) {
-    return { delivered: false, reason: "Telegram is not configured." };
+  const chatId = input.chatId;
+  if (!chatId) {
+    return { delivered: false, reason: "User has not linked their Telegram account." };
   }
 
   try {

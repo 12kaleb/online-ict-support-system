@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Plus, Laptop, Search, Filter, Calendar, Clock, Package, Send, X, Edit2, Trash2, ChevronRight, MoreVertical, FileSpreadsheet, Upload } from 'lucide-react';
+import { Plus, Laptop, Search, Filter, Calendar, Clock, Package, Send, X, Edit2, Trash2, Archive, ChevronRight, MoreVertical, FileSpreadsheet, Upload } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { format } from 'date-fns';
 import { safeDate } from '../utils/dateUtils';
@@ -14,6 +14,16 @@ import { isManager, isTechnician } from '../lib/permissions';
 export default function Assets({ user }: { user: any }) {
   const { t } = useTranslation();
   const isManagerLevel = isManager(user);
+  const maintenanceDefaults = () => {
+    const start = new Date();
+    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    return {
+      type: 'Preventive',
+      scheduledDate: format(start, "yyyy-MM-dd'T'HH:mm"),
+      endDate: format(end, "yyyy-MM-dd'T'HH:mm"),
+      description: ''
+    };
+  };
   const [assets, setAssets] = useState<any[]>([]);
   const [requests, setRequests] = useState<any[]>([]);
   const [assetTypes, setAssetTypes] = useState<any[]>([]);
@@ -41,10 +51,12 @@ export default function Assets({ user }: { user: any }) {
     minStockLevel: 5,
     isConsumable: false
   });
-  const [newMaintenance, setNewMaintenance] = useState({ type: 'Preventive', scheduledDate: format(new Date(), 'yyyy-MM-dd'), description: '' });
+  const [newMaintenance, setNewMaintenance] = useState(maintenanceDefaults);
   const [requestQuantity, setRequestQuantity] = useState(1);
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState('All');
+  const [filterStatus, setFilterStatus] = useState('All');
+  const [filterKind, setFilterKind] = useState('All');
 
   const fetchAssets = async () => {
     try {
@@ -208,8 +220,53 @@ export default function Assets({ user }: { user: any }) {
     }
   };
 
+  const handleRetireAsset = async (asset: any) => {
+    if (asset.status === 'retired') return;
+    const confirmed = window.confirm(`Retire asset "${asset.name}"? Retired assets cannot be requested or scheduled for maintenance.`);
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`/api/assets/${asset.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: asset.name,
+          type: asset.type,
+          typeId: asset.typeId,
+          serialNo: asset.serialNo,
+          brand: asset.brand,
+          quantity: asset.quantity,
+          status: 'retired',
+          minStockLevel: asset.minStockLevel || 0,
+          isConsumable: asset.isConsumable,
+          assignedUserId: asset.assignedUserId || null,
+          assignedDepartment: asset.assignedDepartment || null
+        }),
+      });
+      await handleResponse(res);
+      toast.success('Asset retired successfully');
+      fetchAssets();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to retire asset');
+    }
+  };
+
   const handleScheduleMaintenance = async () => {
     if (!selectedAsset) return;
+    const start = new Date(newMaintenance.scheduledDate);
+    const end = new Date(newMaintenance.endDate);
+    if (!newMaintenance.scheduledDate || Number.isNaN(start.getTime())) {
+      toast.error('Start time is required.');
+      return;
+    }
+    if (start.getTime() < Date.now() - 60_000) {
+      toast.error('Maintenance cannot be scheduled in the past.');
+      return;
+    }
+    if (!newMaintenance.endDate || Number.isNaN(end.getTime()) || end.getTime() <= start.getTime()) {
+      toast.error('End time must be after the start time.');
+      return;
+    }
     try {
       const res = await fetch(`/api/assets/${selectedAsset.id}/maintenance`, {
         method: 'POST',
@@ -219,7 +276,7 @@ export default function Assets({ user }: { user: any }) {
       await handleResponse(res);
       toast.success('Maintenance scheduled successfully');
       setMaintenanceOpen(false);
-      setNewMaintenance({ type: 'Preventive', scheduledDate: format(new Date(), 'yyyy-MM-dd'), description: '' });
+      setNewMaintenance(maintenanceDefaults());
       fetchAssets();
     } catch (err: any) {
       toast.error(err.message || 'Failed to schedule maintenance');
@@ -234,7 +291,9 @@ export default function Assets({ user }: { user: any }) {
         body: JSON.stringify({ quantity }),
       });
       await handleResponse(res);
-      toast.success(t('Request submitted! Admins will be notified.'));
+      toast.success(user?.role === 'technician'
+        ? t('Request submitted for manager approval.')
+        : t('Request submitted! Admins will be notified.'));
       fetchAssets();
     } catch (err: any) {
       toast.error(err.message || 'Failed to submit request');
@@ -268,26 +327,70 @@ export default function Assets({ user }: { user: any }) {
     }
   };
 
+  const clearAssetFilters = () => {
+    setSearch('');
+    setFilterType('All');
+    setFilterStatus('All');
+    setFilterKind('All');
+  };
+
+  const handleApproveRequest = async (id: string) => {
+    try {
+      const res = await fetch(`/api/assets/requests/${id}/approve`, {
+        method: 'PUT',
+      });
+      await handleResponse(res);
+      toast.success(t('Request approved.'));
+      fetchAssets();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to approve request');
+    }
+  };
+
+  const activeFilterCount = [
+    search.trim(),
+    filterType !== 'All',
+    filterStatus !== 'All',
+    filterKind !== 'All',
+  ].filter(Boolean).length;
+
   const filteredAssets = assets.filter(asset => {
-    const matchesSearch = asset.name.toLowerCase().includes(search.toLowerCase()) || 
-                         (asset.serialNo && asset.serialNo.toLowerCase().includes(search.toLowerCase()));
+    const normalizedSearch = search.trim().toLowerCase();
+    const searchableText = [
+      asset.name,
+      asset.serialNo,
+      asset.brand,
+      asset.type,
+      asset.status,
+      asset.assignedDepartment,
+      asset.assignedUser?.name,
+      asset.assignedUser?.department,
+    ].filter(Boolean).join(' ').toLowerCase();
+    const matchesSearch = !normalizedSearch || searchableText.includes(normalizedSearch);
     const matchesType = filterType === 'All' || asset.type === filterType;
-    return matchesSearch && matchesType;
+    const matchesStatus = filterStatus === 'All' || asset.status === filterStatus;
+    const matchesKind =
+      filterKind === 'All' ||
+      (filterKind === 'Consumable' && asset.isConsumable) ||
+      (filterKind === 'Device' && !asset.isConsumable);
+    return matchesSearch && matchesType && matchesStatus && matchesKind;
   });
 
   const canScheduleMaintenance = (asset: any) =>
     !asset?.isConsumable &&
     asset?.quantity === 1 &&
-    asset?.status !== 'maintenance';
+    !['maintenance', 'retired', 'requested'].includes(asset?.status);
 
   const getMaintenanceRestriction = (asset: any) => {
     if (asset?.isConsumable) return 'Consumables cannot be scheduled for maintenance.';
     if (asset?.quantity !== 1) return 'Maintenance can only be scheduled for individual asset units.';
     if (asset?.status === 'maintenance') return 'This asset is already under maintenance.';
+    if (asset?.status === 'retired') return 'Retired assets cannot be scheduled for maintenance.';
+    if (asset?.status === 'requested') return 'Requested assets cannot be scheduled for maintenance.';
     return '';
   };
 
-  const requestableAssets = assets.filter((a) => a.quantity > 0 && a.status !== 'maintenance');
+  const requestableAssets = assets.filter((a) => a.quantity > 0 && !['maintenance', 'retired'].includes(a.status));
 
   if (loading) {
     return (
@@ -371,29 +474,73 @@ export default function Assets({ user }: { user: any }) {
 
       {tab === 0 ? (
         <div className="space-y-6">
-          <div className="flex flex-col md:flex-row gap-4">
-            <div className="relative flex-grow">
-              <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
-              <input 
-                type="text" 
-                placeholder={t('Search assets by name or serial number...')}
-                className="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl text-sm font-medium focus:ring-2 focus:ring-blue-500 transition-all shadow-sm"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-            </div>
-            <div className="flex items-center gap-2 min-w-[200px]">
-              <Filter size={18} className="text-slate-400" />
-              <select 
-                className="w-full px-4 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all shadow-sm"
-                value={filterType}
-                onChange={(e) => setFilterType(e.target.value)}
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col lg:flex-row gap-3">
+              <div className="relative flex-grow">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={20} />
+                <input 
+                  type="text" 
+                  placeholder={t('Search by name, serial, brand, user, or department...')}
+                  className="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl text-sm font-medium focus:ring-2 focus:ring-blue-500 transition-all shadow-sm"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={clearAssetFilters}
+                disabled={activeFilterCount === 0}
+                className="flex items-center justify-center gap-2 px-4 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl text-sm font-black text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed lg:w-auto"
               >
-                <option value="All">{t('All Types')}</option>
-                {assetTypes.map(type => (
-                  <option key={type.id} value={type.name}>{t(type.name)}</option>
-                ))}
+                <X size={18} />
+                {t('Clear')}
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="relative">
+                <Filter size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                <select 
+                  aria-label={t('Filter by type')}
+                  className="w-full pl-12 pr-4 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all shadow-sm"
+                  value={filterType}
+                  onChange={(e) => setFilterType(e.target.value)}
+                >
+                  <option value="All">{t('All Types')}</option>
+                  {assetTypes.map(type => (
+                    <option key={type.id} value={type.name}>{t(type.name)}</option>
+                  ))}
+                </select>
+              </div>
+              <select
+                aria-label={t('Filter by status')}
+                className="w-full px-4 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all shadow-sm"
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+              >
+                <option value="All">{t('All Status')}</option>
+                <option value="active">{t('active')}</option>
+                <option value="maintenance">{t('maintenance')}</option>
+                <option value="retired">{t('retired')}</option>
+                <option value="requested">{t('requested')}</option>
               </select>
+              <select
+                aria-label={t('Filter by asset kind')}
+                className="w-full px-4 py-3 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all shadow-sm"
+                value={filterKind}
+                onChange={(e) => setFilterKind(e.target.value)}
+              >
+                <option value="All">{t('All Assets')}</option>
+                <option value="Device">{t('Devices Only')}</option>
+                <option value="Consumable">{t('Consumables Only')}</option>
+              </select>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs font-bold text-slate-500 dark:text-slate-400">
+              <span>{t('Showing')} {filteredAssets.length} {t('of')} {assets.length}</span>
+              {activeFilterCount > 0 && (
+                <span className="px-2 py-1 bg-blue-50 dark:bg-blue-900/20 text-blue-600 rounded-lg">
+                  {activeFilterCount} {t('filters active')}
+                </span>
+              )}
             </div>
           </div>
 
@@ -481,6 +628,7 @@ export default function Assets({ user }: { user: any }) {
                         <button 
                           onClick={() => {
                             setSelectedAsset(asset);
+                            setNewMaintenance(maintenanceDefaults());
                             setMaintenanceOpen(true);
                           }}
                           disabled={!canScheduleMaintenance(asset)}
@@ -488,6 +636,14 @@ export default function Assets({ user }: { user: any }) {
                           title={canScheduleMaintenance(asset) ? t('Schedule Maintenance') : getMaintenanceRestriction(asset)}
                         >
                           <Calendar size={18} />
+                        </button>
+                        <button
+                          onClick={() => handleRetireAsset(asset)}
+                          disabled={asset.status === 'retired'}
+                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                          title={asset.status === 'retired' ? t('retired') : t('Retire Asset')}
+                        >
+                          <Archive size={18} />
                         </button>
                         <button
                           onClick={() => handleDeleteAsset(asset)}
@@ -499,7 +655,7 @@ export default function Assets({ user }: { user: any }) {
                       </>
                     )}
                   </div>
-                  {(isTechnician(user) || user?.role === 'staff') && asset.quantity > 0 && asset.status !== 'maintenance' && (
+                  {(isTechnician(user) || user?.role === 'staff') && asset.quantity > 0 && !['maintenance', 'retired'].includes(asset.status) && (
                     <button 
                       onClick={() => {
                         setSelectedAsset(asset);
@@ -580,6 +736,7 @@ export default function Assets({ user }: { user: any }) {
                           "px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider w-fit",
                           req.status === 'fulfilled' ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600" :
                           req.status === 'returned' ? "bg-slate-100 dark:bg-slate-800 text-slate-500" :
+                          req.status === 'pending-approval' ? "bg-blue-50 dark:bg-blue-900/20 text-blue-600" :
                           "bg-amber-50 dark:bg-amber-900/20 text-amber-600"
                         )}>
                           {t(req.status)}
@@ -594,6 +751,14 @@ export default function Assets({ user }: { user: any }) {
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex items-center justify-end gap-2">
+                        {req.status === 'pending-approval' && isManagerLevel && (
+                          <button
+                            onClick={() => handleApproveRequest(req.id)}
+                            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-[10px] font-black uppercase tracking-wider rounded-lg transition-all shadow-sm"
+                          >
+                            {t('Approve')}
+                          </button>
+                        )}
                         {req.status === 'pending' && isManagerLevel && (
                           <button 
                             onClick={() => handleFulfillRequest(req.id)}
@@ -856,16 +1021,6 @@ export default function Assets({ user }: { user: any }) {
                         : 'Each quantity creates a separate device unit in inventory.'}
                     </p>
                   </div>
-                  <div>
-                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{t('Min Stock Level')}</label>
-                    <input
-                      type="number"
-                      className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border-none rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all"
-                      value={newAsset.minStockLevel}
-                      onChange={(e) => setNewAsset({ ...newAsset, minStockLevel: parseInt(e.target.value) })}
-                      min={0}
-                    />
-                  </div>
                   <div className="flex items-center gap-3 p-4 bg-slate-50 dark:bg-slate-800 rounded-2xl">
                     <input
                       type="checkbox"
@@ -1091,12 +1246,38 @@ export default function Assets({ user }: { user: any }) {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{t('Scheduled Date')}</label>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{t('Start Time')}</label>
                     <input
-                      type="date"
+                      type="datetime-local"
                       className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border-none rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all"
                       value={newMaintenance.scheduledDate}
-                      onChange={(e) => setNewMaintenance({ ...newMaintenance, scheduledDate: e.target.value })}
+                      min={format(new Date(), "yyyy-MM-dd'T'HH:mm")}
+                      onChange={(e) => {
+                        const nextStart = e.target.value;
+                        const currentEnd = new Date(newMaintenance.endDate);
+                        const nextStartDate = new Date(nextStart);
+                        if (Number.isNaN(nextStartDate.getTime())) {
+                          setNewMaintenance({ ...newMaintenance, scheduledDate: nextStart });
+                          return;
+                        }
+                        setNewMaintenance({
+                          ...newMaintenance,
+                          scheduledDate: nextStart,
+                          endDate: Number.isNaN(currentEnd.getTime()) || currentEnd <= nextStartDate
+                            ? format(new Date(nextStartDate.getTime() + 60 * 60 * 1000), "yyyy-MM-dd'T'HH:mm")
+                            : newMaintenance.endDate
+                        });
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{t('End Time')}</label>
+                    <input
+                      type="datetime-local"
+                      className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border-none rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all"
+                      value={newMaintenance.endDate}
+                      min={newMaintenance.scheduledDate || format(new Date(), "yyyy-MM-dd'T'HH:mm")}
+                      onChange={(e) => setNewMaintenance({ ...newMaintenance, endDate: e.target.value })}
                     />
                   </div>
                   <div>

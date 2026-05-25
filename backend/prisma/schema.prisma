@@ -84,6 +84,8 @@ model Ticket {
   locationLatitude Float?
   locationLongitude Float?
   locationAccuracy Float?
+  buildingBlockNo String?
+  roomNumber  String?
   dueDate     DateTime?
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt

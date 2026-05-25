@@ -243,7 +243,7 @@ export default function TicketDetail({ user }: { user: any }) {
         });
         await handleResponse(res);
         toast.success('Ticket deleted');
-        navigate('/');
+        navigate('/dashboard');
       } catch (err: any) {
         toast.error(err.message || 'Failed to delete ticket');
       } finally {
@@ -393,7 +393,8 @@ export default function TicketDetail({ user }: { user: any }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rating, comment: feedbackComment }),
       });
-      await handleResponse(res);
+      const feedback = await handleResponse(res);
+      setTicket((prev: any) => prev ? { ...prev, feedback } : prev);
       setFeedbackSubmitted(true);
       toast.success('Thank you for your feedback!');
     } catch (err: any) {
@@ -402,11 +403,6 @@ export default function TicketDetail({ user }: { user: any }) {
   };
 
   const handleStaffReview = async (approved: boolean) => {
-    if (!approved) {
-      toast.error('Resolved tickets cannot be reopened. Closed tickets can be appealed.');
-      return;
-    }
-
     setPendingAction(approved ? 'staff-approve' : 'staff-reopen');
     try {
       const res = await fetch(`/api/tickets/${id}/staff-review`, {
@@ -416,7 +412,7 @@ export default function TicketDetail({ user }: { user: any }) {
       });
       const updatedTicket = await handleResponse(res);
       setTicket({ ...ticket, ...updatedTicket });
-      toast.success(approved ? 'Ticket confirmed as solved' : 'Ticket reopened');
+      toast.success(approved ? 'Ticket confirmed as solved' : 'Issue sent back for more work');
       fetch(`/api/tickets/${id}/history`).then(r => r.json()).then(setHistory);
     } catch (err: any) {
       toast.error(err.message || 'Failed to review ticket');
@@ -499,7 +495,7 @@ export default function TicketDetail({ user }: { user: any }) {
       <div className="text-center py-20">
         <AlertCircle className="mx-auto text-slate-300 mb-4" size={48} />
         <h2 className="text-xl font-black text-slate-900">{t('Ticket not found')}</h2>
-        <button onClick={() => navigate('/')} className="mt-4 text-blue-600 font-bold hover:underline">
+        <button onClick={() => navigate('/dashboard')} className="mt-4 text-blue-600 font-bold hover:underline">
           {t('Back to Dashboard')}
         </button>
       </div>
@@ -509,6 +505,10 @@ export default function TicketDetail({ user }: { user: any }) {
   const locationLatitude = typeof ticket.locationLatitude === 'number' ? ticket.locationLatitude : null;
   const locationLongitude = typeof ticket.locationLongitude === 'number' ? ticket.locationLongitude : null;
   const hasLocation = locationLatitude !== null && locationLongitude !== null;
+  const isCompletedTicket = ['pending-confirmation', 'resolved', 'closed'].includes(ticket.status);
+  const showSla = !isCompletedTicket;
+  const canTechnicianManageWork = user?.role === 'technician' && !isCompletedTicket;
+  const canManagerManageTicket = isManagerLevel && user?.role !== 'technician';
 
   return (
     <div className="pb-20">
@@ -540,18 +540,19 @@ export default function TicketDetail({ user }: { user: any }) {
                   )}>
                     {t(ticket.status)}
                   </span>
-                  {ticket.isDelayed && (
+                  {showSla && ticket.isDelayed && (
                     <span className="px-3 py-1 bg-rose-50 text-rose-600 border border-rose-100 rounded-full text-[10px] font-black uppercase tracking-wider animate-pulse">
                       {t('Delayed')}
                     </span>
                   )}
-                  {ticket.slaPaused && (
+                  {showSla && ticket.slaPaused && (
                     <span className="px-3 py-1 bg-amber-50 text-amber-700 border border-amber-100 rounded-full text-[10px] font-black uppercase tracking-wider">
                       {t('SLA Paused')}
                     </span>
                   )}
                   <span className={cn(
                     "px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border",
+                    ticket.priority === 'critical' ? "bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border-red-100 dark:border-red-800" :
                     ticket.priority === 'high' ? "bg-rose-50 dark:bg-rose-900/20 text-rose-600 dark:text-rose-400 border-rose-100 dark:border-rose-800" :
                     ticket.priority === 'medium' ? "bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-100 dark:border-amber-800" :
                     "bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400 border-blue-100 dark:border-blue-800"
@@ -570,7 +571,7 @@ export default function TicketDetail({ user }: { user: any }) {
               </div>
             </div>
             
-            {ticket.slaPaused && (
+            {showSla && ticket.slaPaused && (
               <div className="mb-8 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-100 dark:border-amber-800 rounded-2xl flex items-start gap-3">
                 <Pause className="text-amber-600 shrink-0" size={20} />
                 <div>
@@ -583,7 +584,7 @@ export default function TicketDetail({ user }: { user: any }) {
               </div>
             )}
 
-            {ticket.isDelayed && !ticket.slaPaused && (
+            {showSla && ticket.isDelayed && !ticket.slaPaused && (
               <div className="mb-8 p-4 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-800 rounded-2xl flex items-start gap-3">
                 <AlertTriangle className="text-rose-600 shrink-0" size={20} />
                 <div>
@@ -676,12 +677,12 @@ export default function TicketDetail({ user }: { user: any }) {
             )}
 
             {/* Admin/Tech/Manager Controls */}
-            {(user?.role === 'technician' || isManagerLevel) && (
+            {(canTechnicianManageWork || canManagerManageTicket) && (
               <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5 dark:border-slate-800 dark:bg-slate-800/50">
                 <h3 className="text-xs font-black text-slate-400 uppercase tracking-wider mb-4">{t('Management Actions')}</h3>
                 
                 <div className="flex flex-wrap gap-3 mb-6">
-                  {user?.role === 'technician' && (
+                  {canTechnicianManageWork && (
                     <>
                       <button 
                         onClick={() => handleUpdateStatus('in-progress')}
@@ -718,7 +719,7 @@ export default function TicketDetail({ user }: { user: any }) {
                       </button>
                     </>
                   )}
-                  {isManagerLevel && (
+                  {canManagerManageTicket && showSla && (
                     ticket.slaPaused ? (
                       <button 
                         onClick={handleResumeSLA}
@@ -730,7 +731,7 @@ export default function TicketDetail({ user }: { user: any }) {
                       </button>
                     ) : null
                   )}
-                  {isManagerLevel && (
+                  {canManagerManageTicket && (
                     <button 
                       onClick={handleApprove} 
                       disabled={pendingAction !== null || ticket.status === 'closed' || ticket.isApproved}
@@ -744,12 +745,13 @@ export default function TicketDetail({ user }: { user: any }) {
                       {pendingAction === 'approve' ? t('Saving...') : (ticket.isApproved ? t('Approved') : t('Approve Ticket'))}
                     </button>
                   )}
-                  {isManagerLevel && (
+                  {canManagerManageTicket && (
                     <>
                       <button 
                         onClick={() => handleUpdateStatus('closed')}
-                        disabled={pendingAction !== null || !canMoveToStatus('closed') || ticket.status === 'closed'}
+                        disabled={pendingAction !== null || !canMoveToStatus('closed') || ['pending-confirmation', 'resolved', 'closed'].includes(ticket.status) || ticket.isApproved}
                         className="px-4 py-2 bg-slate-200 hover:bg-slate-300 disabled:bg-slate-100 disabled:text-slate-400 text-slate-700 rounded-xl text-sm font-bold transition-all"
+                        title={ticket.status === 'pending-confirmation' || ticket.status === 'resolved' || ticket.isApproved ? t('Solved tickets cannot be closed.') : t('Close Ticket')}
                       >
                         {pendingAction === 'closed' ? t('Saving...') : t('Close Ticket')}
                       </button>
@@ -765,7 +767,7 @@ export default function TicketDetail({ user }: { user: any }) {
                   )}
                 </div>
                 
-                {isManagerLevel && (
+                {canManagerManageTicket && (
                   <div className="space-y-4">
                     <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider">
                       {t('Assign Technician')} {!ticket.isApproved && `(${t('Requires Approval')})`}
@@ -791,7 +793,7 @@ export default function TicketDetail({ user }: { user: any }) {
                   </div>
                 )}
 
-                {isManagerLevel && (
+                {canManagerManageTicket && (
                   <div className="space-y-4">
                     <h4 className="text-xs font-black text-slate-400 uppercase tracking-wider">
                       {t('Priority')}
@@ -990,7 +992,7 @@ export default function TicketDetail({ user }: { user: any }) {
                 <h2 className="text-2xl font-black text-blue-900 dark:text-blue-200 tracking-tight">{t('Is your issue solved?')}</h2>
               </div>
               <p className="text-blue-700 dark:text-blue-300 font-medium mb-8">
-                {t('Confirm whether the technician solved your issue. Resolved tickets cannot be reopened after this step.')}
+                {t('Confirm whether the technician solved your issue. If it is not solved, send it back with one click.')}
               </p>
               <div className="flex flex-col sm:flex-row gap-3">
                 <button
@@ -999,6 +1001,13 @@ export default function TicketDetail({ user }: { user: any }) {
                   className="btn bg-emerald-600 text-white shadow-sm shadow-emerald-600/20 hover:bg-emerald-700 disabled:bg-slate-300 disabled:shadow-none"
                 >
                   {pendingAction === 'staff-approve' ? t('Saving...') : t('Issue Solved')}
+                </button>
+                <button
+                  onClick={() => handleStaffReview(false)}
+                  disabled={pendingAction !== null}
+                  className="btn bg-white text-blue-700 ring-1 ring-blue-200 hover:bg-blue-100 disabled:bg-slate-100 disabled:text-slate-400 dark:bg-slate-900 dark:text-blue-200 dark:ring-blue-800 dark:hover:bg-blue-950"
+                >
+                  {pendingAction === 'staff-reopen' ? t('Submitting...') : t('Not Solved')}
                 </button>
               </div>
             </motion.div>
@@ -1100,9 +1109,24 @@ export default function TicketDetail({ user }: { user: any }) {
           )}
 
           {feedbackSubmitted && (
-            <div className="bg-emerald-50 dark:bg-emerald-900/20 p-6 rounded-3xl border border-emerald-100 dark:border-emerald-800 flex items-center gap-4">
-              <CheckCircle className="text-emerald-600" size={24} />
-              <p className="text-emerald-800 dark:text-emerald-200 font-bold">{t('Thank you for your feedback! It has been recorded.')}</p>
+            <div className="bg-emerald-50 dark:bg-emerald-900/20 p-6 rounded-3xl border border-emerald-100 dark:border-emerald-800">
+              <div className="flex items-center gap-4">
+                <CheckCircle className="text-emerald-600" size={24} />
+                <p className="text-emerald-800 dark:text-emerald-200 font-bold">{t('Thank you for your feedback! It has been recorded.')}</p>
+              </div>
+              {ticket?.feedback && (
+                <div className="mt-4 rounded-2xl bg-white/70 p-4 dark:bg-slate-900/40">
+                  <div className="flex items-center gap-1 text-amber-400">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <Star key={star} size={18} fill={ticket.feedback.rating >= star ? "currentColor" : "none"} className={ticket.feedback.rating >= star ? "text-amber-400" : "text-slate-300"} />
+                    ))}
+                    <span className="ml-2 text-xs font-black text-slate-600 dark:text-slate-300">{ticket.feedback.rating}/5</span>
+                  </div>
+                  {ticket.feedback.comment && (
+                    <p className="mt-3 text-sm font-medium text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{ticket.feedback.comment}</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -1145,26 +1169,43 @@ export default function TicketDetail({ user }: { user: any }) {
               </div>
               <div className="flex items-center gap-4">
                 <div className="p-2 bg-slate-50 dark:bg-slate-800 rounded-xl text-slate-400">
-                  {ticket.slaPaused ? <Pause size={18} /> : <AlertCircle size={18} />}
+                  <MapPin size={18} />
                 </div>
                 <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{t('SLA Status')}</p>
-                  <p className="text-sm font-bold text-slate-700 dark:text-slate-200">{ticket.slaPaused ? t('Paused') : t(ticket.slaStatus || 'on-track')}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="p-2 bg-slate-50 dark:bg-slate-800 rounded-xl text-slate-400">
-                  <Calendar size={18} />
-                </div>
-                <div>
-                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{t(ticket.slaPaused ? 'Paused Since' : 'SLA Due')}</p>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{t('Building / Room')}</p>
                   <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
-                    {ticket.slaPaused
-                      ? (ticket.blockedAt ? safeDate(ticket.blockedAt).toLocaleString() : t('Not available'))
-                      : (ticket.dueDate ? safeDate(ticket.dueDate).toLocaleString() : t('Not scheduled'))}
+                    {ticket.buildingBlockNo || ticket.roomNumber
+                      ? `${ticket.buildingBlockNo || t('Not provided')} / ${ticket.roomNumber || t('Not provided')}`
+                      : t('Not provided')}
                   </p>
                 </div>
               </div>
+              {showSla && (
+                <>
+                  <div className="flex items-center gap-4">
+                    <div className="p-2 bg-slate-50 dark:bg-slate-800 rounded-xl text-slate-400">
+                      {ticket.slaPaused ? <Pause size={18} /> : <AlertCircle size={18} />}
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{t('SLA Status')}</p>
+                      <p className="text-sm font-bold text-slate-700 dark:text-slate-200">{ticket.slaPaused ? t('Paused') : t(ticket.slaStatus || 'on-track')}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <div className="p-2 bg-slate-50 dark:bg-slate-800 rounded-xl text-slate-400">
+                      <Calendar size={18} />
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-wider">{t(ticket.slaPaused ? 'Paused Since' : 'SLA Due')}</p>
+                      <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
+                        {ticket.slaPaused
+                          ? (ticket.blockedAt ? safeDate(ticket.blockedAt).toLocaleString() : t('Not available'))
+                          : (ticket.dueDate ? safeDate(ticket.dueDate).toLocaleString() : t('Not scheduled'))}
+                      </p>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 

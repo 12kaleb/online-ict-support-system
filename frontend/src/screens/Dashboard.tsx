@@ -20,7 +20,8 @@ import {
   BarChart2,
   ChevronRight,
   ArrowUpRight,
-  Archive
+  Archive,
+  Laptop
 } from 'lucide-react';
 import { Link } from '../lib/router';
 import { useThemeContext } from '../contexts/ThemeContext';
@@ -363,9 +364,9 @@ export default function Dashboard({ user }: { user: any }) {
                 {[
                   { label: t('Schedule Maintenance'), icon: <Calendar size={24} />, to: '/maintenance', color: "text-blue-600", bg: "bg-blue-50 dark:bg-blue-900/20" },
                   { label: isAdminUser ? t('Manage Users') : t('Invite Staff'), icon: <Users size={24} />, to: '/admin', color: "text-emerald-600", bg: "bg-emerald-50 dark:bg-emerald-900/20", inviteOnly: true },
-                  { label: t('View Reports'), icon: <BarChart2 size={24} />, to: '/reports', color: "text-amber-600", bg: "bg-amber-50 dark:bg-amber-900/20" },
-                  { label: t('Inventory'), icon: <Ticket size={24} />, to: '/assets', color: "text-red-600", bg: "bg-red-50 dark:bg-red-900/20", privilegedOnly: true },
-                ].filter(a => (!a.inviteOnly || canInviteStaffUser) && (!a.privilegedOnly || isPrivileged(user))).map((action, i) => (
+                  { label: t('View Reports'), icon: <BarChart2 size={24} />, to: '/reports', color: "text-amber-600", bg: "bg-amber-50 dark:bg-amber-900/20", managerOnly: true },
+                  { label: t('Inventory'), icon: <Laptop size={24} />, to: '/assets', color: "text-red-600", bg: "bg-red-50 dark:bg-red-900/20", privilegedOnly: true },
+                ].filter(a => (!a.inviteOnly || canInviteStaffUser) && (!a.privilegedOnly || isPrivileged(user)) && (!a.managerOnly || isManagerLevel)).map((action, i) => (
                   <Link 
                     key={i} 
                     to={action.to}
