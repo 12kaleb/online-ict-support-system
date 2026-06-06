@@ -4,7 +4,8 @@ import { useEffect, useState } from 'react';
 import { WifiOff } from 'lucide-react';
 import { toast } from 'sonner';
 import DatabaseError from '@/components/DatabaseError';
-import { handleResponse } from '@/utils/apiUtils';
+
+const healthCheckEnabled = process.env.NEXT_PUBLIC_ENABLE_HEALTH_CHECK === 'true';
 
 export default function AppBootstrap({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
@@ -36,9 +37,20 @@ export default function AppBootstrap({ children }: { children: React.ReactNode }
     }
 
     const initApp = async () => {
+      if (!healthCheckEnabled) {
+        setLoading(false);
+        return;
+      }
+
       try {
         const healthRes = await fetch('/api/health');
-        const healthData = await handleResponse(healthRes);
+
+        if (!healthRes.ok) {
+          console.warn(`Backend health check skipped: /api/health returned ${healthRes.status}.`);
+          return;
+        }
+
+        const healthData = await healthRes.json();
 
         if (healthData?.status === 'error') {
           setDbError({
@@ -47,11 +59,7 @@ export default function AppBootstrap({ children }: { children: React.ReactNode }
           });
         }
       } catch (error: any) {
-        console.error('App initialization failed:', error);
-        setDbError({
-          error: error.message || 'Failed to reach the backend API.',
-          code: 'BACKEND_UNREACHABLE',
-        });
+        console.warn('Backend health check skipped:', error);
       } finally {
         setLoading(false);
       }
