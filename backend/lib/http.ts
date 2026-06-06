@@ -7,18 +7,33 @@ export function parseOrigin(value?: string) {
   }
 }
 
+function parseOriginList(value?: string) {
+  return (value || "")
+    .split(",")
+    .map((origin) => parseOrigin(origin.trim()))
+    .filter(Boolean) as string[];
+}
+
 export const configuredOrigins = [
-  parseOrigin(process.env.APP_BASE_URL),
-  parseOrigin(process.env.FRONTEND_ORIGIN),
+  ...parseOriginList(process.env.APP_BASE_URL),
+  ...parseOriginList(process.env.FRONTEND_ORIGIN),
   "https://localhost:3001",
   "http://localhost:3001",
   "https://127.0.0.1:3001",
   "http://127.0.0.1:3001",
 ].filter(Boolean) as string[];
 
+function isVercelOrigin(origin: string) {
+  const { hostname, protocol } = new URL(origin);
+  return protocol === "https:" && hostname.endsWith(".vercel.app");
+}
+
 export function isAllowedOrigin(origin?: string) {
   const parsedOrigin = parseOrigin(origin);
-  return Boolean(parsedOrigin && configuredOrigins.includes(parsedOrigin));
+  return Boolean(
+    parsedOrigin
+      && (configuredOrigins.includes(parsedOrigin) || isVercelOrigin(parsedOrigin)),
+  );
 }
 
 export function parseCookieHeader(header?: string) {
