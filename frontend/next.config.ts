@@ -10,8 +10,8 @@ function getBackendOrigin() {
 
   if (!configuredOrigin) {
     if (isVercelBuild) {
-      throw new Error(
-        'BACKEND_ORIGIN is required for Vercel deployments. Set it to your Render backend URL, for example https://your-backend.onrender.com.',
+      console.warn(
+        'BACKEND_ORIGIN is not set. Vercel can build, but production /api requests will not reach the backend until BACKEND_ORIGIN is set to the Render backend URL.',
       );
     }
 
@@ -29,8 +29,8 @@ function getBackendOrigin() {
   const pointsToLocalhost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
 
   if (isVercelBuild && pointsToLocalhost) {
-    throw new Error(
-      'BACKEND_ORIGIN cannot point to localhost in Vercel deployments. Set it to your deployed backend URL.',
+    console.warn(
+      'BACKEND_ORIGIN points to localhost. Vercel can build, but production /api requests will not reach the backend until BACKEND_ORIGIN is set to the deployed backend URL.',
     );
   }
 
