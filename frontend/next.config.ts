@@ -41,9 +41,6 @@ const backendOrigin = getBackendOrigin();
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: appDir,
-  devIndicators: {
-    appIsrStatus: false,
-  },
   async rewrites() {
     return [
       {
