@@ -49,6 +49,8 @@ FRONTEND_ORIGIN="https://your-vercel-app.vercel.app"
 Optional email and Telegram variables:
 
 ```env
+RESEND_API_KEY=""
+RESEND_FROM="ICT Support <onboarding@your-verified-domain.com>"
 SMTP_HOST=""
 SMTP_PORT="587"
 SMTP_USER=""
@@ -56,6 +58,10 @@ SMTP_PASS=""
 SMTP_FROM=""
 TELEGRAM_BOT_TOKEN=""
 ```
+
+On Render free web services, outbound SMTP ports can time out. For production invites,
+prefer `RESEND_API_KEY`/`RESEND_FROM` or another HTTPS email provider. Keep the SMTP
+variables only for local development or hosting that allows outbound SMTP.
 
 After Render deploys, copy the backend URL, for example:
 
