@@ -61,11 +61,11 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode; user: a
       fetchNotifications();
 
       const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || undefined;
+      const transports = socketUrl ? ['websocket', 'polling'] : ['polling'];
       
       const newSocket = io(socketUrl, {
         withCredentials: true,
-        // Attempt WebSocket first to bypass XHR polling issues in certain proxies/environments.
-        transports: ['websocket', 'polling'],
+        transports,
         reconnectionAttempts: 5,
         reconnectionDelay: 1000,
         timeout: 20000,
