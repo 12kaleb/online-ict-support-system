@@ -593,7 +593,19 @@ async function startServer() {
 
       const { email, password, rememberMe } = parsed.data;
       const normalizedEmail = normalizeEmail(email);
-      const profile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
+      let profile;
+
+      try {
+        profile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
+      } catch (err) {
+        if (!isMissingTableError(err)) {
+          throw err;
+        }
+
+        await ensureDatabaseSchema();
+        profile = await prisma.profile.findUnique({ where: { email: normalizedEmail } });
+      }
+
       if (!profile?.passwordHash) {
         return res.status(401).json({ error: "Invalid email or password" });
       }
@@ -3606,6 +3618,18 @@ async function startServer() {
         }
         if (err.code === 'P2025') {
           return res.status(404).json({ error: "Record not found." });
+        }
+        if (err.code === 'P2021' || err.code === 'P2022') {
+          return res.status(500).json({
+            error: "Database schema is missing or out of date. Run the backend Prisma db push step against the deployed database.",
+            code: "DATABASE_SCHEMA_MISSING",
+          });
+        }
+        if (err.code === 'P1001') {
+          return res.status(500).json({
+            error: "The database server is unreachable. Check the deployed DATABASE_URL host and network access.",
+            code: "DATABASE_UNREACHABLE",
+          });
         }
       } else if (err instanceof Prisma.PrismaClientUnknownRequestError) {
         // Handle unknown Prisma errors (like database corruption)
