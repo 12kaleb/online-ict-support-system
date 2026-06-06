@@ -8,12 +8,10 @@ import { exec, execFile } from "child_process";
 import { promisify } from "util";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-import { PrismaClient, Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import * as dotenv from "dotenv";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import * as XLSX from "xlsx";
-import { ZodError, type ZodType } from "zod";
 import { allowedEmailSchema, inviteUserSchema, loginSchema, setupPasswordSchema } from "./schemas/auth.js";
 import {
   appealSchema,
@@ -24,7 +22,6 @@ import {
   assetTypeSchema,
   assignTicketSchema,
   commentSchema,
-  createTicketSchema,
   createUserSchema,
   delaySchema,
   feedbackSchema,
@@ -43,8 +40,18 @@ import {
   updateUserStatusSchema,
   updateManagerUserPermissionSchema,
 } from "./schemas/api.js";
+import { cookieOptions, HIGH_PRIORITY_LEVELS, INVITE_TOKEN_TTL_MS, isProduction, JWT_COOKIE_NAME, TELEGRAM_LINK_CODE_TTL_MS } from "./config/app.js";
+import { authenticate, isAdmin, isInventoryManager, isManager, isStaff, isTechnician } from "./middleware/auth.js";
+import { createHealthRouter } from "./routes/healthRoutes.js";
+import { createTicketRouter } from "./routes/ticket.routes.js";
+import { formatValidationError, hashPassword, normalizeEmail, parseBody, signAuthToken, verifyAuthToken } from "./lib/auth.js";
+import { configuredOrigins, isAllowedOrigin, parseCookieHeader, parseOrigin } from "./lib/http.js";
+import { prisma } from "./lib/prisma.js";
+import { isActiveStatus, isAdminRole, isManagerRole, isTechnicianRole } from "./lib/roles.js";
 import { buildInviteUrl, sendInviteEmail } from "./services/invitations.js";
-import { getTelegramUpdates, sendTelegramMessage, sendTelegramNotification } from "./services/telegram.js";
+import { createNotificationService, serializeNotification } from "./services/notifications.js";
+import { createSLAService } from "./services/slaService.js";
+import { getTelegramUpdates, sendTelegramMessage } from "./services/telegram.js";
 
 dotenv.config();
 
@@ -55,91 +62,11 @@ if (!process.env.DATABASE_URL) {
   console.warn("WARNING: DATABASE_URL is set to 'localhost:5432'. This will fail in the AI Studio environment. Please provide a real PostgreSQL connection string.");
 }
 
-const prisma = new PrismaClient();
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-if (!process.env.JWT_SECRET || process.env.JWT_SECRET === "ict-support-secret-key-123") {
-  throw new Error("JWT_SECRET must be set to a strong unique value.");
-}
-
-const JWT_SECRET = process.env.JWT_SECRET;
-const INVITE_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
-const TELEGRAM_LINK_CODE_TTL_MS = 10 * 60 * 1000;
-const isAdminRole = (role?: string) => role === "admin";
-const isManagerRole = (role?: string) => role === "manager" || role === "admin";
-const isTechnicianRole = (role?: string) => role === "technician" || isManagerRole(role);
-const isStaffRole = (role?: string) => role === "staff" || isTechnicianRole(role);
-const isInventoryRole = (role?: string) => isTechnicianRole(role);
-const isActiveStatus = (status?: string) => status === "active";
 
 const allowedRoles = new Set(["staff", "technician", "manager", "admin"]);
 const adminInviteRoles = new Set(["staff", "manager", "technician"]);
-const PASSWORD_MIN_LENGTH = 8;
-const JWT_COOKIE_NAME = "token";
-const HIGH_PRIORITY_LEVELS = new Set(["high", "critical"]);
-const TICKET_TEMPLATES: Record<string, { category: string; title: string; description: string; priority: string }> = {
-  network: {
-    category: "Network",
-    title: "Network connectivity issue",
-    description: "Describe the location, affected device, error message, and whether other users are impacted.",
-    priority: "high",
-  },
-  hardware: {
-    category: "Hardware",
-    title: "Hardware fault or damage",
-    description: "Describe the device, symptoms, and whether the device is still usable.",
-    priority: "medium",
-  },
-  account: {
-    category: "Account/Access",
-    title: "Account or access issue",
-    description: "Describe the account, affected system, and what access is missing or failing.",
-    priority: "medium",
-  },
-  software: {
-    category: "Software",
-    title: "Software/application issue",
-    description: "Describe the application, steps taken, and exact error shown.",
-    priority: "medium",
-  },
-};
-const isProduction = process.env.NODE_ENV === "production";
-const cookieOptions: {
-  httpOnly: boolean;
-  secure: boolean;
-  sameSite: "lax";
-} = {
-  httpOnly: true,
-  secure: isProduction,
-  sameSite: "lax",
-};
-
-function parseOrigin(value?: string) {
-  if (!value) return null;
-  try {
-    return new URL(value).origin;
-  } catch {
-    return null;
-  }
-}
-
-function isPresidentialBureauDepartment(department?: string | null) {
-  return Boolean(department?.trim().toLowerCase().includes("presidential bureau"));
-}
-
-const configuredOrigins = [
-  parseOrigin(process.env.APP_BASE_URL),
-  parseOrigin(process.env.FRONTEND_ORIGIN),
-  "https://localhost:3001",
-  "http://localhost:3001",
-  "https://127.0.0.1:3001",
-  "http://127.0.0.1:3001",
-].filter(Boolean) as string[];
-
-function isAllowedOrigin(origin?: string) {
-  const parsedOrigin = parseOrigin(origin);
-  return Boolean(parsedOrigin && configuredOrigins.includes(parsedOrigin));
-}
 
 function getInviteBaseUrl(req: express.Request) {
   const origin = req.get("origin");
@@ -148,23 +75,6 @@ function getInviteBaseUrl(req: express.Request) {
   }
 
   return parseOrigin(process.env.APP_BASE_URL) || parseOrigin(process.env.FRONTEND_ORIGIN) || undefined;
-}
-
-function parseCookieHeader(header?: string) {
-  return Object.fromEntries(
-    (header || "")
-      .split(";")
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => {
-        const separatorIndex = part.indexOf("=");
-        if (separatorIndex === -1) return [part, ""];
-        return [
-          decodeURIComponent(part.slice(0, separatorIndex).trim()),
-          decodeURIComponent(part.slice(separatorIndex + 1).trim()),
-        ];
-      }),
-  );
 }
 
 function isMissingTableError(err: unknown) {
@@ -209,16 +119,6 @@ async function ensureDatabaseSchema() {
   }
 }
 
-type AuthTokenPayload = {
-  sub: string;
-  email: string;
-  role: string;
-};
-
-function normalizeEmail(email: string) {
-  return email.trim().toLowerCase();
-}
-
 function getSLADurationMs(priority?: string) {
   switch (priority) {
     case "critical":
@@ -234,13 +134,6 @@ function getSLADurationMs(priority?: string) {
 
 function getSLADueDate(priority?: string, from = new Date()) {
   return new Date(from.getTime() + getSLADurationMs(priority));
-}
-
-function isValidPassword(password?: string) {
-  return typeof password === "string"
-    && password.length >= PASSWORD_MIN_LENGTH
-    && /[A-Za-z]/.test(password)
-    && /[0-9]/.test(password);
 }
 
 function normalizeStatus(value?: string) {
@@ -331,45 +224,8 @@ function shouldRequireClosureApproval(ticket: { priority?: string }) {
   return HIGH_PRIORITY_LEVELS.has(ticket.priority || "");
 }
 
-function signAuthToken(profile: { id: string; email: string; role: string }) {
-  return jwt.sign(
-    {
-      sub: profile.id,
-      email: profile.email,
-      role: profile.role,
-    } satisfies AuthTokenPayload,
-    JWT_SECRET,
-    { expiresIn: "30d" },
-  );
-}
-
-function verifyAuthToken(token: string) {
-  return jwt.verify(token, JWT_SECRET) as AuthTokenPayload;
-}
-
 function generateTelegramLinkCode() {
   return randomBytes(4).toString("hex").toUpperCase();
-}
-
-async function hashPassword(password: string) {
-  return bcrypt.hash(password, 12);
-}
-
-function formatValidationError(error: ZodError) {
-  const issue = error.issues[0];
-  return issue?.message || "Invalid request payload.";
-}
-
-function parseBody<T>(schema: ZodType<T>, body: unknown) {
-  const parsed = schema.safeParse(body);
-  if (!parsed.success) {
-    const err = new Error(formatValidationError(parsed.error)) as Error & { status?: number; code?: string };
-    err.status = 400;
-    err.code = "VALIDATION_ERROR";
-    throw err;
-  }
-
-  return parsed.data;
 }
 
 async function getTechnicianActiveWork(
@@ -630,7 +486,7 @@ async function startServer() {
       methods: ["GET", "POST"],
     }
   });
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
 
   io.use(async (socket, next) => {
     try {
@@ -699,160 +555,8 @@ async function startServer() {
     next();
   });
 
-  // --- Auth Middleware ---
-  const authenticate = async (req: any, res: any, next: any) => {
-    const token = req.cookies[JWT_COOKIE_NAME];
-    if (!token) return res.status(401).json({ error: "Unauthorized" });
-    try {
-      const payload = verifyAuthToken(token);
-      const profile = await prisma.profile.findUnique({ where: { id: payload.sub } });
-      if (!profile) return res.status(401).json({ error: "Profile not found" });
-      if (!isActiveStatus(profile.status)) {
-        return res.status(403).json({ error: "Your account is not active." });
-      }
-
-      req.user = {
-        id: profile.id,
-        email: profile.email,
-        role: profile.role,
-        status: profile.status,
-        canInviteStaff: profile.canInviteStaff,
-        name: profile.name,
-        department: profile.department,
-        telegramLinked: Boolean(profile.telegramChatId),
-        createdAt: profile.createdAt,
-      };
-      next();
-    } catch (err) {
-      res.status(401).json({ error: "Invalid token" });
-    }
-  };
-
-  const isAdmin = (req: any, res: any, next: any) => {
-    if (!isAdminRole(req.user.role)) return res.status(403).json({ error: "Forbidden" });
-    next();
-  };
-
-  const isManager = (req: any, res: any, next: any) => {
-    if (!isManagerRole(req.user.role)) return res.status(403).json({ error: "Forbidden" });
-    next();
-  };
-
-  const isTechnician = (req: any, res: any, next: any) => {
-    if (!isTechnicianRole(req.user.role)) return res.status(403).json({ error: "Forbidden" });
-    next();
-  };
-
-  const isStaff = (req: any, res: any, next: any) => {
-    if (!isStaffRole(req.user.role)) {
-      return res.status(403).json({ error: "Forbidden" });
-    }
-    next();
-  };
-
-  const isInventoryManager = (req: any, res: any, next: any) => {
-    if (!isInventoryRole(req.user.role)) {
-      return res.status(403).json({ error: "Forbidden" });
-    }
-    next();
-  };
-
-  // --- Helper: Create Notification ---
-  const serializeNotification = (notification: any) => ({
-    ...notification,
-    read: Boolean(notification.isRead),
-  });
-
-  const createNotification = async (userId: string, title: string, message: string, link?: string) => {
-    try {
-      const notification = await prisma.notification.create({
-        data: { userId, title, message, link }
-      });
-      // Emit real-time notification
-      io.to(userId).emit("notification", serializeNotification(notification));
-      const recipient = await prisma.profile.findUnique({
-        where: { id: userId },
-        select: { name: true, email: true, telegramChatId: true },
-      });
-      await sendTelegramNotification({
-        chatId: recipient?.telegramChatId,
-        recipientName: recipient?.name,
-        recipientEmail: recipient?.email,
-        title,
-        message,
-        link,
-      });
-      // Also emit to managers for certain types if needed, but for now just the user
-    } catch (err) {
-      console.error("Failed to create notification:", err);
-    }
-  };
-
-  // --- Helper: Update SLA Statuses ---
-  const updateSLAStatuses = async () => {
-    try {
-      const now = new Date();
-      const openTickets = await prisma.ticket.findMany({
-        where: {
-          status: { notIn: ["pending-confirmation", "closed", "resolved"] },
-          dueDate: { not: null }
-        },
-        include: {
-          user: { select: { name: true } },
-        },
-      });
-
-      for (const ticket of openTickets as any[]) {
-        if (!ticket.dueDate) continue;
-        const dueDate = new Date(ticket.dueDate);
-        let newStatus = ticket.slaStatus;
-        let escalationLevel = ticket.escalationLevel || 0;
-
-        if (ticket.slaPaused) {
-          newStatus = "paused";
-        } else if (now > dueDate) {
-          newStatus = "breached";
-          escalationLevel = 2;
-        } else {
-          const hoursRemaining = (dueDate.getTime() - now.getTime()) / (1000 * 60 * 60);
-          if (hoursRemaining < 2) {
-            newStatus = "at-risk";
-            escalationLevel = Math.max(escalationLevel, 1);
-          } else {
-            newStatus = "on-track";
-          }
-        }
-
-        if (newStatus !== ticket.slaStatus || escalationLevel !== (ticket.escalationLevel || 0)) {
-          await prisma.ticket.update({
-            where: { id: ticket.id },
-            data: {
-              slaStatus: newStatus,
-              escalationLevel,
-              escalatedAt: newStatus === "at-risk" || newStatus === "breached" ? now : null,
-            }
-          });
-
-          if (newStatus === "at-risk" || newStatus === "breached") {
-            const managers = await prisma.profile.findMany({
-              where: { role: { in: ["manager", "admin"] } },
-              select: { id: true },
-            });
-            for (const manager of managers) {
-              await createNotification(
-                manager.id,
-                newStatus === "breached" ? "SLA Breached" : "Ticket At Risk",
-                `${ticket.user?.name || "A user"}'s ticket "${ticket.title}" is ${newStatus}.`,
-                `/tickets/${ticket.id}`,
-              );
-            }
-          }
-        }
-      }
-    } catch (err) {
-      console.error("Failed to update SLA statuses:", err);
-    }
-  };
+  const createNotification = createNotificationService(io);
+  const { updateSLAStatuses } = createSLAService(createNotification);
 
   // --- Helper: Log Ticket History ---
   const logTicketHistory = async (ticketId: string, userId: string, action: string, details?: string) => {
@@ -866,20 +570,12 @@ async function startServer() {
   };
 
   // --- API Routes ---
-  
-  // Health Check
-  app.get("/api/health", async (req, res) => {
-    try {
-      await prisma.$queryRaw`SELECT 1`;
-      res.json({ 
-        status: "ok", 
-        database: "connected", 
-        provider: "postgresql"
-      });
-    } catch (err) {
-      res.status(500).json({ status: "error", database: "disconnected", message: "Database connection failed" });
-    }
-  });
+  app.use("/api", createHealthRouter());
+  app.use("/api/tickets", createTicketRouter({
+    createNotification,
+    updateSLAStatuses,
+    logAssetHistory,
+  }));
 
   // Auth
   app.post("/api/auth/register", (_req, res) => {
@@ -1287,179 +983,6 @@ async function startServer() {
   });
 
   // Tickets
-  app.get("/api/tickets", authenticate, async (req: any, res, next) => {
-    try {
-      let where: any = {};
-      if (req.user.role === "staff") {
-        where = { userId: req.user.id };
-      } else if (req.user.role === "technician") {
-        where = { assignedTo: req.user.id };
-      }
-      
-      const tickets = await prisma.ticket.findMany({
-        where,
-        include: { 
-          user: { select: { name: true } }, 
-          technician: { select: { name: true } },
-          asset: true,
-          attachments: true,
-          feedback: true,
-          approvalRequests: {
-            where: { status: "pending" },
-            select: { id: true, type: true, status: true, createdAt: true },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-      res.json(tickets);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.get("/api/tickets/all", authenticate, isStaff, async (req: any, res, next) => {
-    try {
-      await updateSLAStatuses();
-      let where: any = {};
-      if (req.user.role === "technician") {
-        where = { assignedTo: req.user.id };
-      } else if (req.user.role === "staff") {
-        where = { userId: req.user.id };
-      }
-
-      const tickets = await prisma.ticket.findMany({
-        where,
-        include: { 
-          user: { select: { name: true } }, 
-          technician: { select: { name: true } },
-          asset: true,
-          attachments: true,
-          feedback: true,
-          approvalRequests: {
-            where: { status: "pending" },
-            select: { id: true, type: true, status: true, createdAt: true },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      });
-      res.json(tickets);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.get("/api/tickets/:id", authenticate, async (req: any, res, next) => {
-    try {
-      const ticket = await prisma.ticket.findUnique({
-        where: { id: req.params.id },
-        include: {
-          user: { select: { name: true, email: true } },
-          technician: { select: { name: true, email: true } },
-          asset: true,
-          attachments: true,
-          feedback: true,
-          approvalRequests: {
-            orderBy: { createdAt: "desc" },
-            include: {
-              requestedBy: { select: { id: true, name: true } },
-              reviewedBy: { select: { id: true, name: true } },
-            },
-          },
-          assetUsages: {
-            include: { asset: true, user: { select: { name: true } } },
-            orderBy: { createdAt: "desc" }
-          },
-          history: {
-            include: { user: { select: { name: true } } },
-            orderBy: { createdAt: "desc" }
-          }
-        }
-      });
-      if (!ticket) return res.status(404).json({ error: "Ticket not found" });
-
-      // Authorization Check
-      const isOwner = ticket.userId === req.user.id;
-      const isAssigned = ticket.assignedTo === req.user.id;
-      const isPrivileged = isManagerRole(req.user.role);
-
-      if (req.user.role === "technician" && !isAssigned) {
-        return res.status(403).json({ error: "Technicians can only view assigned tickets" });
-      }
-
-      if (req.user.role === "staff" && !isOwner) {
-        return res.status(403).json({ error: "Forbidden" });
-      }
-
-      if (!isPrivileged && !isAssigned && !isOwner) {
-        return res.status(403).json({ error: "Forbidden" });
-      }
-
-      res.json(ticket);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.post("/api/tickets", authenticate, async (req: any, res, next) => {
-    try {
-      const { title, description, category, priority, assetId, attachments, templateKey, location, buildingBlockNo, roomNumber } = parseBody(createTicketSchema, req.body);
-      const template = templateKey ? TICKET_TEMPLATES[templateKey] : null;
-      const resolvedCategory = category || template?.category || "Other";
-      const resolvedPriority = isPresidentialBureauDepartment(req.user.department)
-        ? "critical"
-        : priority || template?.priority || "medium";
-      const resolvedTitle = title || template?.title;
-      const resolvedDescription = description || template?.description;
-
-      if (!resolvedTitle || !resolvedDescription) {
-        return res.status(400).json({ error: "Title and description are required." });
-      }
-
-      const dueDate = getSLADueDate(resolvedPriority);
-
-      const ticket = await prisma.ticket.create({
-        data: { 
-          title: resolvedTitle, 
-          description: resolvedDescription, 
-          category: resolvedCategory, 
-          priority: resolvedPriority, 
-          templateKey: templateKey || null,
-          userId: req.user.id,
-          assetId: assetId || null,
-          locationLatitude: location?.latitude ?? null,
-          locationLongitude: location?.longitude ?? null,
-          locationAccuracy: location?.accuracy ?? null,
-          buildingBlockNo,
-          roomNumber,
-          dueDate,
-          slaStatus: "on-track",
-          attachments: attachments ? {
-            create: attachments.map((a: any) => ({ name: a.name, url: a.url, type: a.type }))
-          } : undefined
-        },
-      });
-
-      // Log History
-      await logTicketHistory(ticket.id, req.user.id, "Created", `Ticket created with priority: ${resolvedPriority}`);
-
-      if (assetId) {
-        await logAssetHistory(assetId, "ticket-linked", `Linked to ticket "${resolvedTitle}"`, {
-          userId: req.user.id,
-          ticketId: ticket.id,
-        });
-      }
-
-      // Notify Managers
-      const managers = await prisma.profile.findMany({ where: { role: { in: ["manager", "admin"] } } });
-      for (const manager of managers) {
-        await createNotification(manager.id, "New Ticket", `${req.user.name} created a new ticket: ${resolvedTitle}`, `/tickets/${ticket.id}`);
-      }
-
-      res.json(ticket);
-    } catch (err) {
-      next(err);
-    }
-  });
 
   app.put("/api/tickets/:id", authenticate, isStaff, async (req: any, res, next) => {
     try {
@@ -1886,20 +1409,6 @@ async function startServer() {
       });
 
       res.json(feedback);
-    } catch (err) {
-      next(err);
-    }
-  });
-
-  app.delete("/api/tickets/:id", authenticate, isManager, async (req: any, res, next) => {
-    try {
-      const exists = await prisma.ticket.findUnique({ where: { id: req.params.id } });
-      if (!exists) return res.status(404).json({ error: "Ticket not found" });
-
-      await prisma.ticket.delete({
-        where: { id: req.params.id }
-      });
-      res.json({ message: "Ticket deleted successfully" });
     } catch (err) {
       next(err);
     }
@@ -2871,14 +2380,12 @@ async function startServer() {
         });
 
         for (const request of pendingRequests) {
-          await prisma.notification.create({
-            data: {
-              userId: request.userId,
-              title: "Asset Restocked",
-              message: `The asset "${asset.name}" you requested is now back in stock (Qty: ${quantity}).`,
-              link: "/assets"
-            }
-          });
+          await createNotification(
+            request.userId,
+            "Asset Restocked",
+            `The asset "${asset.name}" you requested is now back in stock (Qty: ${quantity}).`,
+            "/assets",
+          );
           
           await prisma.assetRequest.updateMany({
             where: { id: request.id },

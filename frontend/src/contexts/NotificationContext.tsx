@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { io } from 'socket.io-client';
 import { toast } from 'sonner';
 
 interface Notification {
@@ -25,7 +25,6 @@ const NotificationContext = createContext<NotificationContextType | undefined>(u
 
 export const NotificationProvider: React.FC<{ children: React.ReactNode; user: any }> = ({ children, user }) => {
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [socket, setSocket] = useState<Socket | null>(null);
 
   const normalizeNotification = (notification: Notification) => ({
     ...notification,
@@ -61,11 +60,19 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode; user: a
     if (user) {
       fetchNotifications();
 
-      const newSocket = io(window.location.origin);
-      setSocket(newSocket);
+      const socketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || undefined;
+      
+      const newSocket = io(socketUrl, {
+        withCredentials: true,
+        // Attempt WebSocket first to bypass XHR polling issues in certain proxies/environments.
+        transports: ['websocket', 'polling'],
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+        timeout: 20000,
+      });
 
       newSocket.on('notification', (notification: Notification) => {
-        setNotifications(prev => [normalizeNotification(notification), ...prev]);
+        setNotifications(prev => [normalizeNotification(notification), ...prev.slice(0, 19)]); // Keep list manageable
         toast.info(notification.title, {
           description: notification.message,
           action: notification.link ? {
@@ -76,6 +83,10 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode; user: a
             }
           } : undefined
         });
+      });
+
+      newSocket.on('connect_error', (err) => {
+        console.error('Notification socket connection failed:', err.message);
       });
 
       return () => {

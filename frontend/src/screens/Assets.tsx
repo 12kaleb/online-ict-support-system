@@ -11,6 +11,8 @@ import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 import { isManager, isTechnician } from '../lib/permissions';
 
+const EXCEL_FILE_EXTENSIONS = ['.xlsx', '.xls'];
+
 export default function Assets({ user }: { user: any }) {
   const { t } = useTranslation();
   const isManagerLevel = isManager(user);
@@ -60,18 +62,21 @@ export default function Assets({ user }: { user: any }) {
 
   const fetchAssets = async () => {
     try {
-      const res = await fetch('/api/assets');
-      const data = await handleResponse(res);
-      setAssets(Array.isArray(data) ? data : []);
-      
-      const requestsRes = await fetch('/api/assets/requests');
-      const requestsData = await handleResponse(requestsRes);
-      setRequests(Array.isArray(requestsData) ? requestsData : []);
+      const [res, requestsRes, typesRes] = await Promise.all([
+        fetch('/api/assets'),
+        fetch('/api/assets/requests'),
+        fetch('/api/asset-types'),
+      ]);
+      const [data, requestsData, typesData] = await Promise.all([
+        handleResponse(res),
+        handleResponse(requestsRes),
+        handleResponse(typesRes),
+      ]);
 
-      const typesRes = await fetch('/api/asset-types');
-      const typesData = await handleResponse(typesRes);
+      setAssets(Array.isArray(data) ? data : []);
+      setRequests(Array.isArray(requestsData) ? requestsData : []);
       setAssetTypes(Array.isArray(typesData) ? typesData : []);
-      if (typesData.length > 0 && !newAsset.typeId) {
+      if (Array.isArray(typesData) && typesData.length > 0 && !newAsset.typeId) {
         setNewAsset(prev => ({ ...prev, typeId: typesData[0].id, type: typesData[0].name }));
       }
     } catch (err) {
@@ -87,11 +92,25 @@ export default function Assets({ user }: { user: any }) {
   }, []);
 
   const handleAddAsset = async () => {
+    const quantity = Number.parseInt(newAsset.quantity.toString(), 10);
+    if (!newAsset.name.trim()) {
+      toast.error('Asset name is required');
+      return;
+    }
+    if (!newAsset.typeId) {
+      toast.error('Asset type is required');
+      return;
+    }
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      toast.error('Quantity must be at least 1');
+      return;
+    }
+
     try {
       const res = await fetch('/api/assets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...newAsset, quantity: parseInt(newAsset.quantity.toString()) }),
+        body: JSON.stringify({ ...newAsset, name: newAsset.name.trim(), quantity }),
       });
       await handleResponse(res);
       toast.success('Asset added successfully');
@@ -123,6 +142,12 @@ export default function Assets({ user }: { user: any }) {
 
   const handleImportAssets = async (file?: File) => {
     if (!file) return;
+    const isExcelFile = EXCEL_FILE_EXTENSIONS.some((extension) => file.name.toLowerCase().endsWith(extension));
+    if (!isExcelFile) {
+      toast.error('Please choose an Excel file (.xlsx or .xls).');
+      return;
+    }
+
     setImporting(true);
     setImportSummary(null);
     try {
@@ -295,8 +320,10 @@ export default function Assets({ user }: { user: any }) {
         ? t('Request submitted for manager approval.')
         : t('Request submitted! Admins will be notified.'));
       fetchAssets();
+      return true;
     } catch (err: any) {
       toast.error(err.message || 'Failed to submit request');
+      return false;
     }
   };
 
@@ -392,6 +419,18 @@ export default function Assets({ user }: { user: any }) {
 
   const requestableAssets = assets.filter((a) => a.quantity > 0 && !['maintenance', 'retired'].includes(a.status));
 
+  const openRequestModal = (asset?: any) => {
+    setSelectedAsset(asset || null);
+    setRequestQuantity(1);
+    setRequestOpen(true);
+  };
+
+  const closeRequestModal = () => {
+    setRequestOpen(false);
+    setSelectedAsset(null);
+    setRequestQuantity(1);
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center items-center h-64">
@@ -435,7 +474,7 @@ export default function Assets({ user }: { user: any }) {
           )}
           {(isTechnician(user) || user?.role === 'staff') && (
             <button 
-              onClick={() => setRequestOpen(true)}
+              onClick={() => openRequestModal()}
               className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-sm font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors shadow-sm"
             >
               <Send size={18} />
@@ -657,10 +696,7 @@ export default function Assets({ user }: { user: any }) {
                   </div>
                   {(isTechnician(user) || user?.role === 'staff') && asset.quantity > 0 && !['maintenance', 'retired'].includes(asset.status) && (
                     <button 
-                      onClick={() => {
-                        setSelectedAsset(asset);
-                        setRequestOpen(true);
-                      }}
+                      onClick={() => openRequestModal(asset)}
                       className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black transition-all shadow-lg shadow-blue-600/20"
                     >
                       <Send size={14} />
@@ -833,7 +869,10 @@ export default function Assets({ user }: { user: any }) {
                     accept=".xlsx,.xls"
                     disabled={importing}
                     className="hidden"
-                    onChange={(e) => handleImportAssets(e.target.files?.[0])}
+                    onChange={(e) => {
+                      handleImportAssets(e.target.files?.[0]);
+                      e.target.value = '';
+                    }}
                   />
                 </label>
 
@@ -867,7 +906,7 @@ export default function Assets({ user }: { user: any }) {
               <div className="p-8">
                 <div className="flex items-center justify-between mb-6">
                   <h2 className="text-2xl font-black text-slate-900 dark:text-white tracking-tight">{t('Request Asset')}</h2>
-                  <button onClick={() => setRequestOpen(false)} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors">
+                  <button onClick={closeRequestModal} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors">
                     <X size={20} className="text-slate-400" />
                   </button>
                 </div>
@@ -882,7 +921,7 @@ export default function Assets({ user }: { user: any }) {
                       value={selectedAsset?.id || ''}
                       onChange={(e) => {
                         const asset = assets.find(a => a.id === e.target.value);
-                        setSelectedAsset(asset);
+                        setSelectedAsset(asset || null);
                         setRequestQuantity(1);
                       }}
                     >
@@ -920,16 +959,17 @@ export default function Assets({ user }: { user: any }) {
                 </div>
                 <div className="flex gap-3 mt-8">
                   <button 
-                    onClick={() => setRequestOpen(false)}
+                    onClick={closeRequestModal}
                     className="flex-1 px-6 py-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-2xl text-sm font-black transition-all"
                   >
                     {t('Cancel')}
                   </button>
                   <button 
                     disabled={!selectedAsset}
-                    onClick={() => {
-                      handleRequestRestock(selectedAsset.id, requestQuantity);
-                      setRequestOpen(false);
+                    onClick={async () => {
+                      if (!selectedAsset) return;
+                      const submitted = await handleRequestRestock(selectedAsset.id, requestQuantity);
+                      if (submitted) closeRequestModal();
                     }}
                     className="flex-1 px-6 py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-2xl text-sm font-black transition-all shadow-lg shadow-blue-600/20"
                   >
@@ -1012,13 +1052,26 @@ export default function Assets({ user }: { user: any }) {
                       disabled={Boolean(newAsset.serialNo) && !newAsset.isConsumable}
                       className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 disabled:opacity-60 border-none rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all"
                       value={newAsset.quantity}
-                      onChange={(e) => setNewAsset({ ...newAsset, quantity: parseInt(e.target.value) })}
+                      onChange={(e) => setNewAsset({ ...newAsset, quantity: parseInt(e.target.value) || 0 })}
                       min={1}
                     />
                     <p className="mt-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
                       {newAsset.isConsumable
                         ? 'Use quantity for shared stock.'
                         : 'Each quantity creates a separate device unit in inventory.'}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">{t('Minimum Stock Level')}</label>
+                    <input
+                      type="number"
+                      className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border-none rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all"
+                      value={newAsset.minStockLevel}
+                      onChange={(e) => setNewAsset({ ...newAsset, minStockLevel: parseInt(e.target.value) || 0 })}
+                      min={0}
+                    />
+                    <p className="mt-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                      {t('Set a threshold for low stock alerts.')}
                     </p>
                   </div>
                   <div className="flex items-center gap-3 p-4 bg-slate-50 dark:bg-slate-800 rounded-2xl">
@@ -1140,7 +1193,7 @@ export default function Assets({ user }: { user: any }) {
                         disabled={!editingAsset.isConsumable}
                         className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 disabled:opacity-60 border-none rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all"
                         value={editingAsset.isConsumable ? editingAsset.quantity : 1}
-                        onChange={(e) => setEditingAsset({ ...editingAsset, quantity: parseInt(e.target.value) })}
+                        onChange={(e) => setEditingAsset({ ...editingAsset, quantity: parseInt(e.target.value) || 0 })}
                         min={0}
                       />
                       <p className="mt-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
@@ -1155,7 +1208,7 @@ export default function Assets({ user }: { user: any }) {
                         type="number"
                         className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-800 border-none rounded-2xl text-sm font-bold text-slate-700 dark:text-slate-200 focus:ring-2 focus:ring-blue-500 transition-all"
                         value={editingAsset.minStockLevel || 0}
-                        onChange={(e) => setEditingAsset({ ...editingAsset, minStockLevel: parseInt(e.target.value) })}
+                        onChange={(e) => setEditingAsset({ ...editingAsset, minStockLevel: parseInt(e.target.value) || 0 })}
                         min={0}
                       />
                     </div>

@@ -215,6 +215,8 @@ const resources = {
       'completed': 'Completed',
       'scheduled': 'Scheduled',
       'Quantity': 'Quantity',
+      'Minimum Stock Level': 'Minimum Stock Level',
+      'Set a threshold for low stock alerts.': 'Set a threshold for low stock alerts.',
       'Leave empty for consumables': 'Leave empty for consumables',
       'Parts & Assets Used': 'Parts & Assets Used',
       'Record Usage': 'Record Usage',
@@ -464,6 +466,8 @@ const resources = {
       'completed': 'ተጠናቅቋል',
       'scheduled': 'የታቀደ',
       'Quantity': 'ብዛት',
+      'Minimum Stock Level': 'ዝቅተኛ ክምችት ደረጃ',
+      'Set a threshold for low stock alerts.': 'ለዝቅተኛ ክምችት ማስጠንቀቂያዎች ገደብ ያዘጋጁ።',
     }
   }
 };

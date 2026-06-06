@@ -6,7 +6,7 @@
 
 This repository is organized into separate deployment-friendly app folders:
 
-- `frontend/` for the React/Vite client
+- `frontend/` for the Next.js client
 - `backend/` for the Express/Prisma API
 
 
@@ -27,3 +27,9 @@ This repository is organized into separate deployment-friendly app folders:
    `npm run dev:backend`
 5. Run the frontend:
    `npm run dev:frontend`
+
+## Check Types
+
+Run TypeScript checks for both apps from the repository root:
+
+`npm run lint`

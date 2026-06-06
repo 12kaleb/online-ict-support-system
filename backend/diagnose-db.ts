@@ -1,4 +1,5 @@
 import { PrismaClient, Prisma } from "@prisma/client";
+import { PrismaPg } from "@prisma/adapter-pg";
 import * as dotenv from "dotenv";
 
 dotenv.config();
@@ -14,13 +15,10 @@ async function diagnose() {
 
   console.log("Attempting to connect using DATABASE_URL");
 
+  const adapter = new PrismaPg(url);
   const prisma = new PrismaClient({
+    adapter,
     log: ["query", "info", "warn", "error"],
-    datasources: {
-      db: {
-        url,
-      },
-    },
   });
 
   try {

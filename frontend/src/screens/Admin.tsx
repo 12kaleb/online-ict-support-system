@@ -35,7 +35,7 @@ export default function Admin() {
 
   // User Edit state
   const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [editUser, setEditUser] = useState({ id: '', name: '', email: '' });
+  const [editUser, setEditUser] = useState({ id: '', name: '', email: '', role: '', department: '' });
 
   // Password Reset state
   const [resetDialogOpen, setResetDialogOpen] = useState(false);
@@ -88,7 +88,9 @@ export default function Admin() {
 
     try {
       const invitePayload = {
-        ...newUser,
+        name: newUser.name.trim(),
+        email: newUser.email.trim().toLowerCase(),
+        department: newUser.department.trim(),
         role: isStaffInviteOnly ? 'staff' : newUser.role,
       };
       const res = await fetch('/api/admin/create-user', {
@@ -139,7 +141,13 @@ export default function Admin() {
   };
 
   const handleOpenEditUser = (user: any) => {
-    setEditUser({ id: user.id, name: user.name, email: user.email });
+    setEditUser({ 
+      id: user.id, 
+      name: user.name || '', 
+      email: user.email || '',
+      role: user.role || 'staff',
+      department: user.department || ''
+    });
     setEditDialogOpen(true);
   };
 
@@ -149,7 +157,12 @@ export default function Admin() {
       const res = await fetch(`/api/users/${editUser.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: editUser.name, email: editUser.email }),
+        body: JSON.stringify({ 
+          name: editUser.name.trim(), 
+          email: editUser.email.trim().toLowerCase(),
+          role: editUser.role,
+          department: editUser.department.trim()
+        }),
       });
       await handleResponse(res);
       toast.success('User updated successfully');

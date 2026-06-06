@@ -8,19 +8,18 @@ const passwordSchema = z
   .regex(/[A-Za-z]/, PASSWORD_STRENGTH_MESSAGE)
   .regex(/[0-9]/, PASSWORD_STRENGTH_MESSAGE);
 
+const lettersOnlyRegex = /^[\p{L}\s]+$/u;
+
 const optionalTrimmedString = z.preprocess(
   (value) => (value === null ? undefined : value),
-  z.string().trim().optional(),
+  z.coerce.string().trim().optional()
 );
 
 const requiredTrimmedString = (field: string, max = 500) =>
-  z.string({ error: `${field} is required.` }).trim().min(1, `${field} is required.`).max(max, `${field} is too long.`);
+  z.coerce.string({ error: `${field} is required.` }).trim().min(1, `${field} is required.`).max(max, `${field} is too long.`);
 
 const optionalNullableString = (max = 500) =>
-  z.preprocess(
-    (value) => (value === "" ? null : value),
-    z.string().trim().max(max, "Value is too long.").nullable().optional(),
-  );
+  z.preprocess((value) => (value === "" ? null : value), z.coerce.string().trim().max(max, "Value is too long.").nullable().optional());
 
 const positiveInteger = (field: string) =>
   z.coerce.number({ error: `${field} must be a number.` }).int(`${field} must be a whole number.`).min(1, `${field} must be at least 1.`);
@@ -217,18 +216,18 @@ export const approvalResponseSchema = z.object({
 });
 
 export const createUserSchema = z.object({
-  name: requiredTrimmedString("Name", 120),
-  email: z.email("A valid email address is required."),
+  name: requiredTrimmedString("Name", 120).refine(val => lettersOnlyRegex.test(val), "Name must contain only letters."),
+  email: z.string().email("A valid email address is required."),
   password: passwordSchema,
   role: roleSchema.optional().default("staff"),
-  department: optionalNullableString(120),
+  department: optionalNullableString(120).refine(val => val === null || lettersOnlyRegex.test(val), "Department must contain only letters."),
 });
 
 export const updateUserSchema = z.object({
-  name: requiredTrimmedString("Name", 120),
-  email: z.email("A valid email address is required."),
+  name: requiredTrimmedString("Name", 120).refine(val => lettersOnlyRegex.test(val), "Name must contain only letters."),
+  email: z.string().email("A valid email address is required."),
   role: roleSchema.optional(),
-  department: optionalNullableString(120),
+  department: optionalNullableString(120).refine(val => val === null || lettersOnlyRegex.test(val), "Department must contain only letters."),
 });
 
 export const updateUserRoleSchema = z.object({
