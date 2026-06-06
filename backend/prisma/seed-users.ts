@@ -1,11 +1,9 @@
-import { PrismaClient } from "@prisma/client";
 import * as dotenv from "dotenv";
 import bcrypt from "bcryptjs";
 import { getSeedPassword, seedUsers, type SeedUser } from "./seed-data.js";
+import { prisma } from "../lib/prisma.js";
 
 dotenv.config();
-
-const prisma = new PrismaClient();
 
 async function upsertAuthUser(user: SeedUser) {
   const password = getSeedPassword(user.passwordEnv);
