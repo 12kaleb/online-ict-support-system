@@ -728,6 +728,7 @@ async function startServer() {
 
       res.json({
         message: mailResult.delivered ? "Invitation sent successfully." : "Invitation created. SMTP is unavailable or not configured, so the invite link was returned in the response.",
+        emailDelivery: mailResult,
         inviteUrl,
         user: {
           id: profile.id,

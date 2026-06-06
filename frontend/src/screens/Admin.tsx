@@ -100,11 +100,12 @@ export default function Admin() {
       });
       const data = await handleResponse(res);
       if (data?.inviteUrl && data?.message?.toLowerCase().includes('returned in the response')) {
+        const deliveryReason = data?.emailDelivery?.reason ? ` ${data.emailDelivery.reason}` : '';
         try {
           await navigator.clipboard.writeText(data.inviteUrl);
-          toast.warning('Email was not sent. Invite link copied to clipboard.');
+          toast.warning(`Email was not sent. Invite link copied to clipboard.${deliveryReason}`);
         } catch {
-          toast.warning(`Email was not sent. Invite link: ${data.inviteUrl}`);
+          toast.warning(`Email was not sent.${deliveryReason} Invite link: ${data.inviteUrl}`);
         }
       } else {
         toast.success(data?.message || 'Invitation sent successfully');

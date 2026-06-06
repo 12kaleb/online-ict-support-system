@@ -11,6 +11,29 @@ dns.setDefaultResultOrder("ipv4first");
 
 let transporterPromise: Promise<nodemailer.Transporter | null> | null = null;
 
+function errorMessage(err: unknown) {
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function getSmtpHostConfig() {
+  if (!smtpHost) {
+    return null;
+  }
+
+  const forceIpv4 = process.env.SMTP_FORCE_IPV4 !== "false";
+  if (!forceIpv4) {
+    return { host: smtpHost };
+  }
+
+  const { address } = await dns.promises.lookup(smtpHost, { family: 4 });
+  return {
+    host: address,
+    tls: {
+      servername: smtpHost,
+    },
+  };
+}
+
 async function getTransporter() {
   if (transporterPromise) {
     return transporterPromise;
@@ -21,10 +44,18 @@ async function getTransporter() {
       return null;
     }
 
+    const hostConfig = await getSmtpHostConfig();
+    if (!hostConfig) {
+      return null;
+    }
+
     const transporter = nodemailer.createTransport({
-      host: smtpHost,
+      ...hostConfig,
       port: smtpPort,
       secure: smtpPort === 465,
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
+      socketTimeout: 30000,
       auth: {
         user: smtpUser,
         pass: smtpPass,
@@ -50,16 +81,17 @@ export async function sendMail(input: {
   text: string;
 }) {
   const hasSmtpConfig = Boolean(smtpHost && smtpUser && smtpPass);
+  let failedReason = hasSmtpConfig ? "SMTP is unavailable" : "SMTP is not configured";
   const transporter = await getTransporter().catch((err) => {
+    failedReason = `SMTP connection failed: ${errorMessage(err)}`;
     console.error(`SMTP connection failed. Skipping email delivery to ${input.to}.`, err);
     return null;
   });
 
   if (!transporter) {
-    const reason = hasSmtpConfig ? "SMTP is unavailable" : "SMTP is not configured";
-    console.warn(`${reason}. Skipping email delivery to ${input.to}.`);
+    console.warn(`${failedReason}. Skipping email delivery to ${input.to}.`);
     console.log(input.text);
-    return { delivered: false as const };
+    return { delivered: false as const, reason: failedReason };
   }
 
   try {
@@ -71,8 +103,9 @@ export async function sendMail(input: {
       text: input.text,
     });
   } catch (err) {
+    const reason = `SMTP send failed: ${errorMessage(err)}`;
     console.error(`SMTP send failed. Skipping email delivery to ${input.to}.`, err);
-    return { delivered: false as const };
+    return { delivered: false as const, reason };
   }
 
   return { delivered: true as const };
