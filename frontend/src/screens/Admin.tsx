@@ -98,8 +98,17 @@ export default function Admin() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(invitePayload),
       });
-      await handleResponse(res);
-      toast.success('Invitation created successfully');
+      const data = await handleResponse(res);
+      if (data?.inviteUrl && data?.message?.toLowerCase().includes('returned in the response')) {
+        try {
+          await navigator.clipboard.writeText(data.inviteUrl);
+          toast.warning('Email was not sent. Invite link copied to clipboard.');
+        } catch {
+          toast.warning(`Email was not sent. Invite link: ${data.inviteUrl}`);
+        }
+      } else {
+        toast.success(data?.message || 'Invitation sent successfully');
+      }
       setOpen(false);
       setNewUser({ name: '', email: '', role: isStaffInviteOnly ? 'staff' : 'technician', department: '' });
       fetchUsers();
